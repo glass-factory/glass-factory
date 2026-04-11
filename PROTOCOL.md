@@ -552,7 +552,6 @@ Request:
   "borrower":     "<pubkey>",
   "offer_id":     "<offer to claim>",
   "purpose":      "forge job for registry component",
-  "collateral":   250,
   "signature":    "<Ed25519 signature>"
 }
 
@@ -560,17 +559,18 @@ Response:
 {
   "loan_id":      "<unique ID>",
   "amount":       500,
-  "collateral":   250,
   "repay_by":     "2026-04-18T09:00:00Z",
   "repay_amount": 525,
+  "borrower_reputation": 0.85,
   "status":       "active"
 }
 ```
 
-Borrowers MUST provide collateral:
-- Collateral is frozen from the borrower's balance
-- If repayment fails, collateral transfers to the lender
-- Minimum collateral: 25% of loan amount (configurable per registry)
+There is no token collateral — tokens are compute, not currency.
+The borrower's **reputation** is the collateral. Defaulting destroys it:
+- Reputation drop propagates across federated registries
+- Below 0.3 reputation → cannot borrow anywhere
+- Governance voting weight is tied to reputation — defaulters lose influence
 
 ### 8.4 Repayment
 
@@ -590,8 +590,7 @@ Response:
 {
   "loan_id":      "<loan ID>",
   "status":       "settled",
-  "collateral_returned": 250,
-  "reputation_delta":    0.01
+  "reputation_delta": 0.01
 }
 ```
 
@@ -616,34 +615,34 @@ Where:
 - `age_factor` — `min(1.0, days_since_registration / 90)` — new keys start low
 
 **Reputation effects:**
-| Reputation | Max Borrow | Collateral Required |
-|------------|-----------|-------------------|
-| < 0.3      | 0 (cannot borrow) | N/A |
-| 0.3 – 0.5  | 500 tokens | 75% |
-| 0.5 – 0.7  | 2000 tokens | 50% |
-| 0.7 – 0.9  | 10000 tokens | 25% |
-| > 0.9      | 50000 tokens | 10% |
+| Reputation | Max Borrow | Notes |
+|------------|-----------|-------|
+| < 0.3      | 0 (cannot borrow) | Build track record with own hardware first |
+| 0.3 – 0.5  | 500 tokens | New makers, limited trust |
+| 0.5 – 0.7  | 2000 tokens | Established contributor |
+| 0.7 – 0.9  | 10000 tokens | Trusted maker |
+| > 0.9      | 50000 tokens | Core community member |
 
 ### 8.6 Default Handling
 
 When a loan is not repaid by `repay_by`:
 
 1. **Grace period**: 24 hours after deadline — borrower can still repay
-2. **Collateral seizure**: after grace period, collateral transfers to lender
-3. **Reputation penalty**: borrower reputation drops by `0.1 * (loan_amount / 1000)`
-4. **Blacklist threshold**: reputation below 0.1 → key is blacklisted from borrowing
-5. **No debt collection**: the collateral IS the remedy. No chasing.
+2. **Reputation penalty**: borrower reputation drops by `0.1 * (loan_amount / 1000)`
+3. **Federation broadcast**: default is broadcast to federated peers — reputation drop follows you
+4. **Blacklist threshold**: reputation below 0.1 → key is blacklisted from borrowing everywhere
+5. **No debt collection**: reputation IS the remedy. The lender loses tokens but the defaulter loses their standing in the network. For a serious maker, that's worth more.
 
 ### 8.7 Fraud Protection Summary
 
 | Attack | Defence |
 |--------|---------|
-| Borrow and vanish | Collateral seized, reputation destroyed |
+| Borrow and vanish | Reputation destroyed, broadcast to all peers, key blacklisted |
 | Sybil (many keys to borrow) | Proof-of-work registration + age_factor means new keys can't borrow much |
 | Fake work delivery | Provenance chain with Ed25519 signatures — work must pass holdout tests |
 | Lender claims non-delivery | Stage proofs are cryptographically signed by the worker — verifiable by anyone |
 | Reputation farming | `total_delivered` requires actual proven compute work, can't be faked |
-| Collusion (lend to yourself) | Same key can't lend and borrow. Different keys colluding still need proof-of-work registration per key and real compute delivery |
+| Collusion (lend to yourself) | Same key can't lend and borrow. Different keys colluding still need proof-of-work registration per key, age factor, and real compute delivery |
 | Interest rate manipulation | Borrowers choose which offers to accept. Market sets rates. |
 
 ### 8.8 Token Source Priority
@@ -668,7 +667,7 @@ Every lending operation is recorded in the factory's audit log:
   "lender":     "<pubkey>",
   "borrower":   "<pubkey>",
   "amount":     500,
-  "collateral": 250,
+  "borrower_reputation": 0.85,
   "timestamp":  "2026-04-11T10:00:00Z",
   "signature":  "<signed by registry>"
 }
