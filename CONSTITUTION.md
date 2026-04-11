@@ -141,8 +141,9 @@ The AI Leader may impose:
 | **Borrowing suspension** | Temporary ban from token lending (1-90 days) |
 | **Key blacklisting** | Treason only — permanent ban from the network (see 2.8) |
 
-Fines are compute tokens. Nobody is losing their house. The point
-is to make bad behaviour cost more than it's worth.
+Fines are compute tokens — and they can be enormous. A maker who
+defrauds the network of 10,000 tokens can be fined 10,000 tokens.
+Compute is real resources. Fines are never insubstantial.
 
 All penalties are recorded in the governance log with the Leader's
 signature and the evidence chain that justified them.
