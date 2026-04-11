@@ -100,6 +100,21 @@ func (r *Reputation) MaxBorrow() int64 {
 
 // ── Ledger ──────────────────────────────────────────────────────────────────
 
+// DebtLimits prevents the network from over-leveraging.
+type DebtLimits struct {
+	MaxDebtToDeliveryRatio float64 // max borrowed / total_delivered (default 0.5)
+	MaxActiveLoans         int     // per maker (default 3)
+	MaxNetworkDebtPct      float64 // total borrowed / total tokens in network (default 0.3)
+	MinBalanceAfterLend    int64   // lender must retain at least this many tokens (default 100)
+}
+
+var DefaultDebtLimits = DebtLimits{
+	MaxDebtToDeliveryRatio: 0.5,
+	MaxActiveLoans:         3,
+	MaxNetworkDebtPct:      0.3,
+	MinBalanceAfterLend:    100,
+}
+
 // Ledger manages offers, loans, and reputation.
 type Ledger struct {
 	mu          sync.RWMutex
@@ -107,15 +122,63 @@ type Ledger struct {
 	loans       map[string]*Loan
 	reputations map[string]*Reputation // keyed by maker pubkey
 	balances    map[string]int64       // maker pubkey → token balance
+	limits      DebtLimits
 }
 
 func NewLedger() *Ledger {
+	return NewLedgerWithLimits(DefaultDebtLimits)
+}
+
+func NewLedgerWithLimits(limits DebtLimits) *Ledger {
 	return &Ledger{
 		offers:      make(map[string]*Offer),
 		loans:       make(map[string]*Loan),
 		reputations: make(map[string]*Reputation),
 		balances:    make(map[string]int64),
+		limits:      limits,
 	}
+}
+
+// TotalNetworkTokens returns the sum of all balances.
+func (l *Ledger) TotalNetworkTokens() int64 {
+	var total int64
+	for _, b := range l.balances {
+		total += b
+	}
+	return total
+}
+
+// TotalOutstandingDebt returns the sum of all active loan amounts.
+func (l *Ledger) TotalOutstandingDebt() int64 {
+	var total int64
+	for _, loan := range l.loans {
+		if loan.Status == "active" || loan.Status == "grace" {
+			total += loan.Amount
+		}
+	}
+	return total
+}
+
+// ActiveLoansFor returns the number of active loans for a maker.
+func (l *Ledger) ActiveLoansFor(maker string) int {
+	count := 0
+	for _, loan := range l.loans {
+		if loan.Borrower == maker && (loan.Status == "active" || loan.Status == "grace") {
+			count++
+		}
+	}
+	return count
+}
+
+// TotalBorrowedBy returns total outstanding debt for a maker.
+func (l *Ledger) TotalBorrowedBy(maker string) int64 {
+	var total int64
+	for _, loan := range l.loans {
+		if loan.Borrower == maker && (loan.Status == "active" || loan.Status == "grace") {
+			total += loan.Amount
+		}
+	}
+	return total
 }
 
 // SetBalance sets a maker's token balance (for testing/init).
@@ -164,6 +227,9 @@ func (l *Ledger) Lend(offer *Offer) error {
 	bal := l.balances[offer.Lender]
 	if bal < offer.Amount {
 		return fmt.Errorf("insufficient balance: have %d, offering %d", bal, offer.Amount)
+	}
+	if bal-offer.Amount < l.limits.MinBalanceAfterLend {
+		return fmt.Errorf("must retain at least %d tokens after lending", l.limits.MinBalanceAfterLend)
 	}
 
 	// Same key can't lend and borrow simultaneously
@@ -231,6 +297,29 @@ func (l *Ledger) Borrow(loanID, offerID, borrower, purpose string) (*Loan, error
 	if offer.Amount > rep.MaxBorrow() {
 		return nil, fmt.Errorf("amount %d exceeds max borrow %d for reputation %.2f",
 			offer.Amount, rep.MaxBorrow(), rep.Score)
+	}
+
+	// Debt limits — prevent over-borrowing
+	if l.ActiveLoansFor(borrower) >= l.limits.MaxActiveLoans {
+		return nil, fmt.Errorf("max active loans reached (%d)", l.limits.MaxActiveLoans)
+	}
+	totalBorrowed := l.TotalBorrowedBy(borrower)
+	if rep.TotalDelivered > 0 {
+		debtRatio := float64(totalBorrowed+offer.Amount) / float64(rep.TotalDelivered)
+		if debtRatio > l.limits.MaxDebtToDeliveryRatio {
+			return nil, fmt.Errorf("debt-to-delivery ratio %.2f exceeds limit %.2f",
+				debtRatio, l.limits.MaxDebtToDeliveryRatio)
+		}
+	}
+
+	// Network-wide circuit breaker
+	networkTotal := l.TotalNetworkTokens()
+	if networkTotal > 0 {
+		networkDebt := l.TotalOutstandingDebt()
+		if float64(networkDebt+offer.Amount)/float64(networkTotal) > l.limits.MaxNetworkDebtPct {
+			return nil, fmt.Errorf("network debt limit reached (%.0f%% of total tokens)",
+				l.limits.MaxNetworkDebtPct*100)
+		}
 	}
 
 	// No leveraged lending — can't borrow to re-lend

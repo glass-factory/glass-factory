@@ -1,6 +1,7 @@
 package lending
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -228,6 +229,113 @@ func TestMaxBorrow(t *testing.T) {
 		if got := r.MaxBorrow(); got != c.max {
 			t.Errorf("score %.1f: expected max %d, got %d", c.score, c.max, got)
 		}
+	}
+}
+
+func TestMaxActiveLoans(t *testing.T) {
+	l := NewLedgerWithLimits(DebtLimits{
+		MaxDebtToDeliveryRatio: 10.0, // high so it doesn't block
+		MaxActiveLoans:         2,
+		MaxNetworkDebtPct:      1.0,
+		MinBalanceAfterLend:    0,
+	})
+	l.RegisterMaker("lender")
+	l.SetBalance("lender", 100000)
+	l.RegisterMaker("borrower")
+	l.reputations["borrower"].SuccessfulRepays = 10
+	l.reputations["borrower"].TotalLoans = 10
+	l.reputations["borrower"].TotalDelivered = 100000
+	l.reputations["borrower"].RegisteredAt = time.Now().Add(-365 * 24 * time.Hour).Format(time.RFC3339)
+
+	for i := 0; i < 2; i++ {
+		o := &Offer{ID: fmt.Sprintf("o-%d", i), Lender: "lender", Amount: 100, MinReputation: 0, MaxDurationHrs: 24, InterestPct: 0}
+		l.Lend(o)
+		_, err := l.Borrow(fmt.Sprintf("l-%d", i), o.ID, "borrower", "work")
+		if err != nil {
+			t.Fatalf("loan %d should succeed: %v", i, err)
+		}
+	}
+
+	o3 := &Offer{ID: "o-3", Lender: "lender", Amount: 100, MinReputation: 0, MaxDurationHrs: 24, InterestPct: 0}
+	l.Lend(o3)
+	_, err := l.Borrow("l-3", "o-3", "borrower", "one too many")
+	if err == nil {
+		t.Fatal("3rd loan should be blocked by max active loans")
+	}
+}
+
+func TestDebtToDeliveryRatio(t *testing.T) {
+	l := NewLedgerWithLimits(DebtLimits{
+		MaxDebtToDeliveryRatio: 0.5,
+		MaxActiveLoans:         10,
+		MaxNetworkDebtPct:      1.0,
+		MinBalanceAfterLend:    0,
+	})
+	l.RegisterMaker("lender")
+	l.SetBalance("lender", 100000)
+	l.RegisterMaker("borrower")
+	l.reputations["borrower"].SuccessfulRepays = 10
+	l.reputations["borrower"].TotalLoans = 10
+	l.reputations["borrower"].TotalDelivered = 10000 // has delivered 10000
+	l.reputations["borrower"].RegisteredAt = time.Now().Add(-365 * 24 * time.Hour).Format(time.RFC3339)
+	l.reputations["borrower"].ComputeScore() // pre-compute so MaxBorrow works
+
+	// Can borrow up to 5000 (50% of 10000 delivered)
+	o1 := &Offer{ID: "o-1", Lender: "lender", Amount: 4000, MinReputation: 0, MaxDurationHrs: 24, InterestPct: 0}
+	l.Lend(o1)
+	_, err := l.Borrow("l-1", "o-1", "borrower", "ok")
+	if err != nil {
+		t.Fatalf("4000 should be within ratio: %v", err)
+	}
+
+	// 4000 + 2000 = 6000 > 5000 limit
+	o2 := &Offer{ID: "o-2", Lender: "lender", Amount: 2000, MinReputation: 0, MaxDurationHrs: 24, InterestPct: 0}
+	l.Lend(o2)
+	_, err = l.Borrow("l-2", "o-2", "borrower", "too much")
+	if err == nil {
+		t.Fatal("should be blocked by debt-to-delivery ratio")
+	}
+}
+
+func TestNetworkCircuitBreaker(t *testing.T) {
+	l := NewLedgerWithLimits(DebtLimits{
+		MaxDebtToDeliveryRatio: 10.0,
+		MaxActiveLoans:         10,
+		MaxNetworkDebtPct:      0.3, // 30% of network
+		MinBalanceAfterLend:    0,
+	})
+	l.RegisterMaker("lender")
+	l.SetBalance("lender", 10000)
+	l.RegisterMaker("borrower")
+	l.SetBalance("borrower", 0)
+	l.reputations["borrower"].SuccessfulRepays = 10
+	l.reputations["borrower"].TotalLoans = 10
+	l.reputations["borrower"].TotalDelivered = 100000
+	l.reputations["borrower"].RegisteredAt = time.Now().Add(-365 * 24 * time.Hour).Format(time.RFC3339)
+
+	// Network has 10000 total, 30% limit = 3000
+	o1 := &Offer{ID: "o-1", Lender: "lender", Amount: 3500, MinReputation: 0, MaxDurationHrs: 24, InterestPct: 0}
+	l.Lend(o1)
+	_, err := l.Borrow("l-1", "o-1", "borrower", "too much for network")
+	if err == nil {
+		t.Fatal("should be blocked by network circuit breaker")
+	}
+}
+
+func TestMinBalanceAfterLend(t *testing.T) {
+	l := NewLedgerWithLimits(DebtLimits{
+		MaxDebtToDeliveryRatio: 10.0,
+		MaxActiveLoans:         10,
+		MaxNetworkDebtPct:      1.0,
+		MinBalanceAfterLend:    500,
+	})
+	l.RegisterMaker("lender")
+	l.SetBalance("lender", 1000)
+
+	o := &Offer{ID: "o-1", Lender: "lender", Amount: 600, MinReputation: 0, MaxDurationHrs: 24, InterestPct: 0}
+	err := l.Lend(o)
+	if err == nil {
+		t.Fatal("should block — would leave only 400, below 500 minimum")
 	}
 }
 
