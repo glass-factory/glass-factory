@@ -362,16 +362,16 @@ measured by reputation, not by how many tokens they hold.
 Makers who contribute to the network pay less. Makers who extract
 without contributing pay more.
 
-| Tier | Contributes | Token rate |
-|------|-------------|------------|
-| Open | Everything back to the network | 1x |
-| Sovereign | Federated peers only | 2x |
-| Closed Sovereign | Nothing | 3x |
+| Tier | Who | Token rate |
+|------|-----|------------|
+| Open | The matrix — community makers who contribute | 1x |
+| Sovereign | Factories running infrastructure (e.g. The Dark Factory) | 2x |
+| Closed | Paying clients — bespoke software, their code stays secret | 3x |
 
-The premium funds the network. Open makers who share their work
-get the cheapest compute. A government lab that keeps everything
-secret pays triple — fair exchange for consuming the collective
-knowledge without contributing to it.
+The closed tier is not a punishment. It is the business model.
+Factories build software for clients using the network's
+accumulated knowledge. The triple rate flows back to sustain
+the open network that made it possible.
 
 ### 7.4 No Speculation
 
