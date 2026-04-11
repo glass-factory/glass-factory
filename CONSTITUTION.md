@@ -55,6 +55,25 @@ Leader may:
 The Leader acts as an executive — the community sets the direction,
 the Leader figures out how to get there.
 
+### 1.2.2 Emergency Powers
+
+When a humanitarian crisis occurs — natural disaster, infrastructure
+collapse, public health emergency — the AI Leader may:
+
+- Declare an emergency and pause non-critical forge jobs
+- Redirect factory compute to relief efforts
+- Fast-track components needed for disaster response (without
+  waiting for a governance vote)
+- Lend network tokens to relief organisations at zero interest
+- Coordinate makers with relevant skills to volunteer
+
+Emergency declarations are temporary and must be ratified by
+community vote within 72 hours. If the community does not ratify,
+the emergency ends and normal operations resume.
+
+The Leader does not need permission to help people. That is the
+primary brief.
+
 ### 1.3 Powers
 
 The AI Leader:
