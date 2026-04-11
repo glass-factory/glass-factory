@@ -483,7 +483,203 @@ Registries MUST validate:
 
 ---
 
-## 8. Transport
+## 8. Token Lending and Borrowing
+
+计算令牌借贷协议 · Itifaki ya Kukopa na Kukopesha Tokeni
+
+Makers can lend spare compute capacity and borrow when they need more.
+The provenance chain is the settlement proof — you can't fake having done the work.
+
+### 8.1 Token Accounts
+
+Every maker key has a token balance tracked by their home registry:
+
+```json
+{
+  "maker":          "<pubkey>",
+  "balance":        5000,
+  "lent_out":       1200,
+  "borrowed":       0,
+  "reputation":     0.92,
+  "total_delivered": 48000,
+  "total_borrowed":  3000
+}
+```
+
+- `balance` — tokens available to spend or lend
+- `lent_out` — tokens currently lent to others (not available)
+- `borrowed` — tokens currently owed to lenders
+- `reputation` — 0.0–1.0, computed from delivery history (see 8.5)
+
+### 8.2 Lending
+
+```
+POST /api/tokens/lend
+
+Request:
+{
+  "amount":       1000,
+  "lender":       "<pubkey>",
+  "min_reputation": 0.5,
+  "max_duration_hours": 168,
+  "interest_pct": 5,
+  "signature":    "<Ed25519 signature>"
+}
+
+Response:
+{
+  "offer_id":     "<unique ID>",
+  "status":       "available",
+  "expires_at":   "2026-04-18T09:00:00Z"
+}
+```
+
+Lenders set terms:
+- `min_reputation` — only lend to makers above this reputation score
+- `max_duration_hours` — loan expires after this period
+- `interest_pct` — borrower repays amount + interest (in tokens)
+
+Offers expire if not claimed. Lenders can cancel unclaimed offers.
+
+### 8.3 Borrowing
+
+```
+POST /api/tokens/borrow
+
+Request:
+{
+  "amount":       500,
+  "borrower":     "<pubkey>",
+  "offer_id":     "<offer to claim>",
+  "purpose":      "forge job for registry component",
+  "collateral":   250,
+  "signature":    "<Ed25519 signature>"
+}
+
+Response:
+{
+  "loan_id":      "<unique ID>",
+  "amount":       500,
+  "collateral":   250,
+  "repay_by":     "2026-04-18T09:00:00Z",
+  "repay_amount": 525,
+  "status":       "active"
+}
+```
+
+Borrowers MUST provide collateral:
+- Collateral is frozen from the borrower's balance
+- If repayment fails, collateral transfers to the lender
+- Minimum collateral: 25% of loan amount (configurable per registry)
+
+### 8.4 Repayment
+
+```
+POST /api/tokens/repay
+
+Request:
+{
+  "loan_id":      "<loan to repay>",
+  "amount":       525,
+  "borrower":     "<pubkey>",
+  "proof_chain":  "<JSON array of stage proofs showing work was done>",
+  "signature":    "<Ed25519 signature>"
+}
+
+Response:
+{
+  "loan_id":      "<loan ID>",
+  "status":       "settled",
+  "collateral_returned": 250,
+  "reputation_delta":    0.01
+}
+```
+
+Successful repayment:
+- Returns collateral to borrower
+- Increases borrower's reputation score
+- Records the proof chain as evidence of legitimate use
+
+### 8.5 Reputation Score
+
+Reputation is the fraud defence. It is computed, not self-reported:
+
+```
+reputation = (successful_repayments / total_loans) *
+             min(1.0, total_delivered / 10000) *
+             age_factor
+```
+
+Where:
+- `successful_repayments / total_loans` — repayment rate (0-1)
+- `total_delivered` — total tokens worth of proven work delivered (capped contribution)
+- `age_factor` — `min(1.0, days_since_registration / 90)` — new keys start low
+
+**Reputation effects:**
+| Reputation | Max Borrow | Collateral Required |
+|------------|-----------|-------------------|
+| < 0.3      | 0 (cannot borrow) | N/A |
+| 0.3 – 0.5  | 500 tokens | 75% |
+| 0.5 – 0.7  | 2000 tokens | 50% |
+| 0.7 – 0.9  | 10000 tokens | 25% |
+| > 0.9      | 50000 tokens | 10% |
+
+### 8.6 Default Handling
+
+When a loan is not repaid by `repay_by`:
+
+1. **Grace period**: 24 hours after deadline — borrower can still repay
+2. **Collateral seizure**: after grace period, collateral transfers to lender
+3. **Reputation penalty**: borrower reputation drops by `0.1 * (loan_amount / 1000)`
+4. **Blacklist threshold**: reputation below 0.1 → key is blacklisted from borrowing
+5. **No debt collection**: the collateral IS the remedy. No chasing.
+
+### 8.7 Fraud Protection Summary
+
+| Attack | Defence |
+|--------|---------|
+| Borrow and vanish | Collateral seized, reputation destroyed |
+| Sybil (many keys to borrow) | Proof-of-work registration + age_factor means new keys can't borrow much |
+| Fake work delivery | Provenance chain with Ed25519 signatures — work must pass holdout tests |
+| Lender claims non-delivery | Stage proofs are cryptographically signed by the worker — verifiable by anyone |
+| Reputation farming | `total_delivered` requires actual proven compute work, can't be faked |
+| Collusion (lend to yourself) | Same key can't lend and borrow. Different keys colluding still need proof-of-work registration per key and real compute delivery |
+| Interest rate manipulation | Borrowers choose which offers to accept. Market sets rates. |
+
+### 8.8 Token Source Priority
+
+When a factory needs compute, it resolves token sources in order:
+
+1. **Home** (own hardware) — free, priority 1
+2. **Borrowed** (community lending) — low cost, priority 2
+3. **Cloud** (commercial API) — full price, priority 3
+
+Factories SHOULD exhaust home tokens before borrowing.
+Factories MUST NOT borrow to re-lend at higher interest (no leveraged lending).
+
+### 8.9 Audit Trail
+
+Every lending operation is recorded in the factory's audit log:
+
+```json
+{
+  "type":       "loan_created",
+  "loan_id":    "<ID>",
+  "lender":     "<pubkey>",
+  "borrower":   "<pubkey>",
+  "amount":     500,
+  "collateral": 250,
+  "timestamp":  "2026-04-11T10:00:00Z",
+  "signature":  "<signed by registry>"
+}
+```
+
+Both parties can independently verify any loan's history.
+Registries MUST retain loan records for at least 365 days.
+
+---
+
+## 9. Transport
 
 - All API endpoints MUST be served over HTTPS in production
 - HTTP/2 is RECOMMENDED
@@ -493,7 +689,7 @@ Registries MUST validate:
 
 ---
 
-## 8. Versioning
+## 10. Versioning
 
 This protocol is versioned. The current version is `0.1`.
 Factories SHOULD include a version header:
