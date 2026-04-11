@@ -678,7 +678,152 @@ Registries MUST retain loan records for at least 365 days.
 
 ---
 
-## 9. Transport
+## 9. Factory Learning (Knowledge Federation)
+
+工厂学习协议 · Itifaki ya Kujifunza kwa Kiwanda
+
+Every factory gets better with every run. The Glass Factory network
+compounds this across all participating factories.
+
+### 9.1 Knowledge Entries
+
+After each forge job, the factory extracts learnings:
+
+```json
+{
+  "id":          "<unique ID>",
+  "category":    "pattern",
+  "topic":       "Go HTTP middleware ordering",
+  "content":     "Auth middleware must run before rate limiting...",
+  "source_job":  "<job ID that produced this>",
+  "confidence":  0.85,
+  "used_count":  12,
+  "language":    "go",
+  "source_factory": "https://home.darkfactory.dev"
+}
+```
+
+Categories: `pattern`, `lesson`, `failure_mode`, `proof_strategy`,
+`test_strategy`, `architecture_decision`, `ada_knowledge`.
+
+### 9.2 Knowledge Classification
+
+Each knowledge entry inherits classification from its source job:
+
+- `contribute` — offered to the network (default for open factories)
+- `federated` — shared with trusted peers only
+- `secret` — stays local, never leaves
+
+Factories MUST NOT share knowledge from `secret` or `federated` jobs
+with the public registry.
+
+### 9.3 Contributing Knowledge
+
+```
+POST /api/knowledge/contribute
+
+Request:
+{
+  "entries": [
+    {
+      "category":    "pattern",
+      "topic":       "SQLite WAL mode for concurrent readers",
+      "content":     "Enable WAL mode at connection time for...",
+      "language":    "go",
+      "confidence":  0.9,
+      "proof_chain": "<stage proofs showing this was learned from real work>",
+      "signature":   "<Ed25519 signature>",
+      "signer_pubkey": "<factory pubkey>"
+    }
+  ]
+}
+
+Response:
+{
+  "accepted": 1,
+  "rejected": 0,
+  "reputation_delta": 0.005
+}
+```
+
+Contributing proven knowledge increases the factory's reputation.
+The proof chain shows this came from a real job, not fabrication.
+
+### 9.4 Consuming Knowledge
+
+```
+POST /api/knowledge/query
+
+Request:
+{
+  "category":  "pattern",
+  "language":  "go",
+  "topics":    ["http", "middleware", "auth"],
+  "limit":     10
+}
+
+Response:
+[
+  {
+    "topic":        "Go HTTP middleware ordering",
+    "content":      "Auth middleware must run before rate limiting...",
+    "confidence":   0.85,
+    "used_count":   47,
+    "contributors": 3,
+    "source_factories": ["https://factory-a.com", "https://factory-b.cn"]
+  }
+]
+```
+
+Factories inject relevant knowledge into agent prompts before each
+forge stage. The more the network contributes, the better every
+factory gets.
+
+### 9.5 Knowledge Validation
+
+Knowledge entries are validated through use:
+
+- **Confidence increases** when a factory uses the knowledge and the
+  job succeeds (tests pass, holdout scores high)
+- **Confidence decreases** when a factory uses the knowledge and the
+  job fails or produces poor results
+- **Entries below 0.2 confidence** are pruned from the public registry
+
+This is natural selection for factory knowledge — good patterns
+survive, bad ones die.
+
+### 9.6 Knowledge Provenance
+
+Every knowledge entry carries:
+- The Ed25519 signature of the contributing factory
+- A reference to the stage proof chain that produced it
+- The number of factories that have independently confirmed it
+
+Knowledge with multiple independent confirmations is ranked higher
+than single-source knowledge. This prevents one factory from
+poisoning the knowledge base.
+
+### 9.7 Improvement Flow
+
+```
+Factory runs job
+  → Extracts patterns, lessons, failure modes
+  → Classified as contribute?
+    → YES: POST /api/knowledge/contribute to home registry
+      → Home registry federates to peers
+      → Peers validate through their own use
+      → Confidence adjusts based on real results
+    → NO: Stays local, still improves this factory
+```
+
+The network effect: 100 factories each running 10 jobs/day produces
+1000 learning opportunities. Each factory benefits from all of them.
+This is the moat — no single factory can replicate the compound
+learning of the network.
+
+---
+
+## 10. Transport
 
 - All API endpoints MUST be served over HTTPS in production
 - HTTP/2 is RECOMMENDED
@@ -688,7 +833,7 @@ Registries MUST retain loan records for at least 365 days.
 
 ---
 
-## 10. Versioning
+## 11. Versioning
 
 This protocol is versioned. The current version is `0.1`.
 Factories SHOULD include a version header:
