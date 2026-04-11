@@ -145,6 +145,11 @@ Fines are compute tokens — and they can be enormous. A maker who
 defrauds the network of 10,000 tokens can be fined 10,000 tokens.
 Compute is real resources. Fines are never insubstantial.
 
+The AI Leader SHOULD prefer warnings, mediation, and reputation
+adjustments before resorting to fines. A healthy network rarely
+needs its judiciary. Fines exist so they almost never have to
+be used.
+
 All penalties are recorded in the governance log with the Leader's
 signature and the evidence chain that justified them.
 
