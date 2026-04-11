@@ -357,7 +357,23 @@ The AI Leader may inspect balances during dispute resolution
 No league tables. No rich lists. A maker's contribution is
 measured by reputation, not by how many tokens they hold.
 
-### 7.3 No Speculation
+### 7.3 Token Pricing by Tier
+
+Makers who contribute to the network pay less. Makers who extract
+without contributing pay more.
+
+| Tier | Contributes | Token rate |
+|------|-------------|------------|
+| Open | Everything back to the network | 1x |
+| Sovereign | Federated peers only | 2x |
+| Closed Sovereign | Nothing | 3x |
+
+The premium funds the network. Open makers who share their work
+get the cheapest compute. A government lab that keeps everything
+secret pays triple — fair exchange for consuming the collective
+knowledge without contributing to it.
+
+### 7.4 No Speculation
 
 Tokens MUST NOT be traded on exchanges, converted to currency,
 or used as financial instruments. The Glass Factory is a
