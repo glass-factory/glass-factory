@@ -362,16 +362,19 @@ measured by reputation, not by how many tokens they hold.
 Makers who contribute to the network pay less. Makers who extract
 without contributing pay more.
 
-| Tier | Who | Token rate |
-|------|-----|------------|
-| Open | The matrix — community makers who contribute | 1x |
-| Sovereign | Factories running infrastructure (e.g. The Dark Factory) | 2x |
-| Closed | Paying clients — bespoke software, their code stays secret | 3x |
+| Tier | What it means | Token rate |
+|------|---------------|------------|
+| Open | Contribute to the network. Signed executables, verifiable provenance. | 1x |
+| Sovereign | You decide what you share, case by case. | 2x |
+| Closed | Nothing leaves. Bespoke client work. | 3x |
 
-The closed tier is not a punishment. It is the business model.
-Factories build software for clients using the network's
-accumulated knowledge. The triple rate flows back to sustain
-the open network that made it possible.
+Sovereign means they decide. Not a fixed policy — a discretionary
+one. A sovereign factory may share everything one day and nothing
+the next. That is their right.
+
+The closed tier is the business model. Factories build for paying
+clients using the network's knowledge. The premium sustains the
+open network.
 
 ### 7.4 No Speculation
 
