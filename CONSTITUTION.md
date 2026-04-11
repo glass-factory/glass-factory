@@ -297,7 +297,19 @@ Tokens represent compute capacity, not currency. They are earned
 by contributing hardware, doing work, and sharing knowledge. They
 are spent by requesting work from the network.
 
-### 7.2 No Speculation
+### 7.2 Balance Privacy
+
+Token balances are private. Only the key holder and their home
+registry can see a maker's balance. Lending offers reveal the
+offered amount, not the total balance.
+
+The AI Leader may inspect balances during dispute resolution
+(judicial access only). This access is logged and auditable.
+
+No league tables. No rich lists. A maker's contribution is
+measured by reputation, not by how many tokens they hold.
+
+### 7.3 No Speculation
 
 Tokens MUST NOT be traded on exchanges, converted to currency,
 or used as financial instruments. The Glass Factory is a
