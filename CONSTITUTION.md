@@ -136,14 +136,34 @@ The AI Leader may impose:
 
 | Penalty | Description |
 |---------|-------------|
+| **Token fine** | Deduct tokens from maker's balance — proportional to offence |
 | **Reputation reduction** | Decrease maker's reputation score |
-| **Borrowing suspension** | Temporary or permanent ban from token lending |
-| **Federation exclusion** | Factory excluded from federated searches |
-| **Component delisting** | Component removed from the registry |
-| **Key blacklisting** | Maker key permanently banned from the network |
+| **Borrowing suspension** | Temporary ban from token lending (1-90 days) |
+| **Key blacklisting** | Treason only — permanent ban from the network (see 2.8) |
+
+Fines are compute tokens. Nobody is losing their house. The point
+is to make bad behaviour cost more than it's worth.
 
 All penalties are recorded in the governance log with the Leader's
 signature and the evidence chain that justified them.
+
+### 2.8 Treason
+
+Key blacklisting is reserved exclusively for treason against the
+matrix — acts that betray the network itself:
+
+- Deliberately weaponising the network against the never-build list
+- Sybil attacks on governance (fake identities to manipulate votes)
+- Sabotaging federation (poisoning peer registries with malicious code)
+- Compromising another maker's Ed25519 private key
+
+Treason requires a full hearing. Summary conviction MUST NOT be
+used for treason charges. The AI Leader presents the evidence,
+the respondent has 14 days to respond, and a three-AI panel
+renders the final verdict.
+
+Blacklisting is permanent. There is no appeal from a treason
+conviction. The key is dead.
 
 ### 2.7 Appeal
 
@@ -193,13 +213,14 @@ Per-field classification (public, contribute, federated, secret) is
 enforced at every boundary — API, federation, knowledge extraction.
 Classification is not advisory. It is the law of the network.
 
-### 4.2 Breach is a Crime
+### 4.2 Breach
 
-Leaking secret-classified data is the most serious offence in the
-Glass Factory. The AI Leader MUST impose key blacklisting on any
-maker or factory proven to have breached classification.
+Leaking secret-classified data is a serious offence. The AI Leader
+imposes federation exclusion and reputation reduction on any maker
+or factory proven to have breached classification.
 
-There are no warnings for classification breach.
+Deliberate breach — leaking secret data to hostile parties with
+intent to harm — is treason (Article II, Section 2.8).
 
 ### 4.3 Sovereign Factory Rights
 
