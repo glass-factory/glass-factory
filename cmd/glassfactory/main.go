@@ -457,19 +457,9 @@ func main() {
 		factoryMu.Lock()
 		node, exists := factories[hb.PublicKey]
 		if !exists {
-			// Auto-register on first heartbeat
-			factories[hb.PublicKey] = &FactoryNode{
-				PublicKey:    hb.PublicKey,
-				Status:      hb.Status,
-				Models:      hb.Models,
-				QueueLen:    hb.QueueLen,
-				CacheBytes:  hb.CacheBytes,
-				UptimeSecs:  hb.UptimeSecs,
-				RegisteredAt: now,
-				LastSeen:     now,
-			}
 			factoryMu.Unlock()
-			log.Printf("factory auto-registered via heartbeat: %.8s", hb.PublicKey)
+			http.Error(w, `{"error":"factory not registered — call /api/factory/register first"}`, http.StatusForbidden)
+			return
 		} else {
 			node.Status = hb.Status
 			node.Models = hb.Models
@@ -549,13 +539,20 @@ func main() {
 		}
 		factoryMu.Unlock()
 
-		log.Printf("factory paired: %.8s", pubKey)
+		// Grant early adopter tokens and register in ledger
+		ledger.RegisterMaker(pubKey)
+		earlyAdopterGrant := int64(1000)
+		ledger.SetBalance(pubKey, ledger.Balance(pubKey)+earlyAdopterGrant)
+
+		log.Printf("factory paired: %.8s (granted %d tokens)", pubKey, earlyAdopterGrant)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
-			"status":      "paired",
-			"public_key":  pubKey,
-			"fingerprint": pubKey[:16],
-			"message":     "Welcome to the Glass Factory. 欢迎加入玻璃工厂。",
+			"status":        "paired",
+			"public_key":    pubKey,
+			"fingerprint":   pubKey[:16],
+			"tokens_granted": earlyAdopterGrant,
+			"balance":       ledger.Balance(pubKey),
+			"message":       "Welcome to the Glass Factory. 1000 tokens granted. 欢迎加入玻璃工厂。",
 		})
 	})
 
@@ -609,6 +606,104 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{
 			"vault_key": vaultKey,
 			"expires":   "3600", // key valid for 1 hour (client should re-fetch)
+		})
+	})
+
+	// ── Token economy endpoints ──────────────────────────────────────────
+
+	// Check balance for a factory
+	mux.HandleFunc("GET /api/tokens/balance/", func(w http.ResponseWriter, r *http.Request) {
+		pubKey := strings.TrimPrefix(r.URL.Path, "/api/tokens/balance/")
+		if pubKey == "" || len(pubKey) != 64 {
+			http.Error(w, `{"error":"public_key required (64 hex chars)"}`, http.StatusBadRequest)
+			return
+		}
+		bal := ledger.Balance(pubKey)
+		rep, _ := ledger.GetReputation(pubKey)
+		score := 0.0
+		if rep != nil {
+			score = rep.Score
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"public_key": pubKey,
+			"balance":    bal,
+			"reputation": score,
+		})
+	})
+
+	// Earn tokens — called when a factory completes a build job
+	mux.HandleFunc("POST /api/tokens/earn", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PublicKey string `json:"public_key"`
+			Amount   int64  `json:"amount"`
+			JobID    string `json:"job_id"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if req.PublicKey == "" || req.Amount <= 0 {
+			http.Error(w, `{"error":"public_key and positive amount required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Only registered factories can earn
+		factoryMu.RLock()
+		_, registered := factories[req.PublicKey]
+		factoryMu.RUnlock()
+		if !registered {
+			http.Error(w, `{"error":"factory not registered"}`, http.StatusForbidden)
+			return
+		}
+
+		ledger.RegisterMaker(req.PublicKey) // idempotent
+		ledger.SetBalance(req.PublicKey, ledger.Balance(req.PublicKey)+req.Amount)
+
+		log.Printf("tokens earned: %.8s +%d (job=%s reason=%s)", req.PublicKey, req.Amount, req.JobID, req.Reason)
+		json.NewEncoder(w).Encode(map[string]any{
+			"public_key": req.PublicKey,
+			"earned":     req.Amount,
+			"balance":    ledger.Balance(req.PublicKey),
+		})
+	})
+
+	// Spend tokens — called when a user submits a spec for building
+	mux.HandleFunc("POST /api/tokens/spend", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PublicKey string `json:"public_key"`
+			Amount   int64  `json:"amount"`
+			Purpose  string `json:"purpose"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if req.PublicKey == "" || req.Amount <= 0 {
+			http.Error(w, `{"error":"public_key and positive amount required"}`, http.StatusBadRequest)
+			return
+		}
+
+		bal := ledger.Balance(req.PublicKey)
+		if bal < req.Amount {
+			http.Error(w, fmt.Sprintf(`{"error":"insufficient tokens: have %d, need %d"}`, bal, req.Amount), http.StatusPaymentRequired)
+			return
+		}
+
+		ledger.SetBalance(req.PublicKey, bal-req.Amount)
+		log.Printf("tokens spent: %.8s -%d (purpose=%s)", req.PublicKey, req.Amount, req.Purpose)
+		json.NewEncoder(w).Encode(map[string]any{
+			"public_key": req.PublicKey,
+			"spent":      req.Amount,
+			"balance":    ledger.Balance(req.PublicKey),
+		})
+	})
+
+	// Network token stats
+	mux.HandleFunc("GET /api/tokens/stats", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"total_tokens":     ledger.TotalNetworkTokens(),
+			"outstanding_debt": ledger.TotalOutstandingDebt(),
 		})
 	})
 
