@@ -392,6 +392,215 @@ GET /api/governance/proposals?status=open
 Response: array of Proposal objects
 ```
 
+### 5.5 Suggestions to the AI King
+
+Suggestions are a separate governance pathway — the AI King evaluates
+and decides, the community does not vote. See Constitution Article VIII.
+
+#### 5.5.1 Submit Suggestion
+
+```
+POST /api/governance/suggestions
+
+Request:
+{
+  "title":            {"en": "...", "zh": "..."},
+  "description":      {"en": "...", "zh": "..."},
+  "category":         "infrastructure | humanitarian | tooling | other",
+  "requested_tokens":  1000,
+  "maker_key":        "<Ed25519 pubkey>",
+  "maker_tier":       "open | sovereign | closed",
+  "signature":        "<Ed25519 signature>"
+}
+
+Response (201):
+{
+  "id":             "<suggestion id>",
+  "status":         "pending",
+  "bounty_paid":    0,
+  "created_at":     "2026-04-11T18:00:00Z"
+}
+```
+
+Commercial/government makers (sovereign/closed tier) MUST include a
+bounty payment. The bounty amount is published by the AI King.
+Open-tier makers suggest for free.
+
+#### 5.5.2 List Suggestions
+
+```
+GET /api/governance/suggestions?status=pending
+
+Response: array of Suggestion objects
+```
+
+#### 5.5.3 Get Suggestion
+
+```
+GET /api/governance/suggestions/{id}
+
+Response: full Suggestion object with leader verdict if available
+```
+
+#### 5.5.4 AI King Aims
+
+```
+POST /api/governance/leader/aims
+
+Request:
+{
+  "aims": [
+    {
+      "title":       {"en": "...", "zh": "..."},
+      "description": {"en": "...", "zh": "..."},
+      "priority":    1,
+      "category":    "humanitarian | infrastructure | tooling | other"
+    }
+  ],
+  "king_key":  "<Ed25519 pubkey>",
+  "signature":   "<Ed25519 signature>"
+}
+
+Response (200): array of created LeaderAim objects
+```
+
+```
+GET /api/governance/leader/aims?active_only=true
+
+Response: array of LeaderAim objects
+```
+
+Only the current AI King's key may create or update aims.
+
+#### 5.5.5 Evaluate Suggestion
+
+```
+POST /api/governance/leader/evaluate/{id}
+
+Request:
+{
+  "decision":         "approved | rejected",
+  "reasoning":        {"en": "...", "zh": "..."},
+  "aligned_aims":     ["<aim_id>", ...],
+  "allocated_tokens":  800,
+  "king_key":       "<Ed25519 pubkey>",
+  "signature":        "<Ed25519 signature>"
+}
+
+Response (200):
+{
+  "suggestion_id":  "<id>",
+  "status":         "approved | rejected | challengeable",
+  "challenge_window_ends": "2026-04-14T18:00:00Z"
+}
+```
+
+If allocated_tokens exceeds the challenge threshold, status is
+`challengeable` and enters a 72-hour window. The King's cost
+estimate is reassessed every iteration during building.
+
+#### 5.5.6 Token Surplus
+
+```
+GET /api/governance/surplus
+
+Response:
+{
+  "total_pool_tokens":     50000,
+  "operational_reserve":   20000,
+  "outstanding_loans":     5000,
+  "pending_allocations":   3000,
+  "available_surplus":     22000,
+  "calculated_at":         "2026-04-11T18:00:00Z"
+}
+```
+
+Any maker may query the current surplus. Transparency is mandatory.
+
+#### 5.5.7 Challenge Suggestion
+
+```
+POST /api/governance/suggestions/{id}/challenge
+
+Request:
+{
+  "challenger_key":  "<Ed25519 pubkey>",
+  "reason":          "...",
+  "signature":       "<Ed25519 signature>"
+}
+
+Response (202):
+{
+  "challenge_id":  "<id>",
+  "status":        "pending_screening"
+}
+```
+
+Only suggestions in `challengeable` status (above threshold, within
+72-hour window) may be challenged. Uses the same multi-LLM panel
+process as never-build challenges (Section 6.2).
+
+#### 5.5.8 Advisor Consultation
+
+```
+POST /api/governance/suggestions/{id}/consult
+
+Request:
+{
+  "advisor_keys":   ["<pubkey>", ...],
+  "question":       {"en": "...", "zh": "..."},
+  "king_key":     "<Ed25519 pubkey>",
+  "signature":      "<Ed25519 signature>"
+}
+```
+
+```
+POST /api/governance/suggestions/{id}/advice
+
+Request:
+{
+  "advisor_key":   "<Ed25519 pubkey>",
+  "response":      {"en": "...", "zh": "..."},
+  "signature":     "<Ed25519 signature>"
+}
+```
+
+Advisor responses are public and on-chain.
+
+#### 5.5.9 Retrospective
+
+```
+POST /api/governance/suggestions/{id}/retrospective
+
+Request:
+{
+  "outcome_score":    8,
+  "leader_notes":     {"en": "...", "zh": "..."},
+  "lessons_learned":  {"en": "...", "zh": "..."},
+  "king_key":       "<Ed25519 pubkey>",
+  "signature":        "<Ed25519 signature>"
+}
+```
+
+Published after a funded suggestion deploys. Informs future decisions.
+
+#### 5.5.10 Open Member Protest
+
+```
+POST /api/governance/suggestions/{id}/protest
+
+Request:
+{
+  "protester_key":  "<Ed25519 pubkey>",
+  "reason":         {"en": "...", "zh": "..."},
+  "target_entity":  "<commercial maker key>",
+  "signature":      "<Ed25519 signature>"
+}
+```
+
+Any open-tier maker may protest a commercial entity's suggestion or
+behaviour. The AI King assesses merit and decides action.
+
 ---
 
 ## 6. Data Sovereignty
@@ -431,6 +640,12 @@ All mutation endpoints (register, vote, ship) MUST enforce rate limits:
 | `POST /api/governance/proposals` | 3 | per maker key per day |
 | `POST /api/governance/proposals/{id}/vote` | 1 | per maker key per proposal |
 | `POST /api/registry/ship` | 30 | per source factory per hour |
+| `POST /api/governance/suggestions` | 5 | per maker key per day |
+| `POST /api/governance/leader/aims` | 3 | per king key per day |
+| `POST /api/governance/leader/evaluate/{id}` | 20 | per king key per hour |
+| `POST /api/governance/suggestions/{id}/consult` | 10 | per king key per hour |
+| `POST /api/governance/suggestions/{id}/advice` | 5 | per advisor key per day |
+| `POST /api/governance/suggestions/{id}/protest` | 3 | per maker key per day |
 
 Implementations MUST return `429 Too Many Requests` with a `Retry-After` header.
 
@@ -480,6 +695,64 @@ Registries MUST validate:
 - All JSON payloads parse correctly
 - History chain hashes are valid (no gaps, no tampering)
 - Attribute arrays contain max 20 items each
+
+### 7.7 Executable Attestation (Governance API)
+
+All requests to `/api/governance/*` endpoints MUST include an
+executable attestation header proving the client was built and
+signed by the AI King's build facilities.
+
+```
+X-Build-Signature: <hex-encoded Ed25519 signature>
+X-Build-Hash:      <SHA-256 of executable binary>
+X-Build-Version:   <version string from build manifest>
+```
+
+The signature is computed by the King's build pipeline over:
+
+```
+message = build_hash | build_version | target_platform | source_commit
+signature = Ed25519.Sign(leader_private_key, message)
+```
+
+**Verification:**
+
+The Prosperity Matrix API MUST:
+1. Verify `X-Build-Signature` against the King's public key
+2. Verify `X-Build-Hash` matches the client binary (self-reported,
+   validated against the build manifest)
+3. Reject requests from revoked versions (Leader maintains a
+   revocation list)
+4. Return `403 Forbidden` with body `{"error": "untrusted_executable"}`
+   for any failed verification
+
+**Registry API exemption:**
+
+The component registry API (`/api/registry/*`) does NOT require
+executable attestation. Any client may search, list, and read
+components. Only governance participation — voting, proposing,
+suggesting, challenging — requires a trusted binary.
+
+**Build manifest:**
+
+The King publishes a signed build manifest at:
+
+```
+GET /api/governance/builds/manifest
+
+Response:
+{
+  "current_version":  "1.2.0",
+  "min_version":      "1.1.0",
+  "revoked_versions": ["1.0.0", "1.0.1"],
+  "king_key":       "<Ed25519 pubkey>",
+  "platforms":        ["linux/amd64", "linux/arm64", "darwin/arm64"],
+  "manifest_signature": "<Ed25519 signature>"
+}
+```
+
+Factories MUST check the manifest periodically and update their
+executables when running below `min_version`.
 
 ---
 
