@@ -20,12 +20,16 @@ type Honour struct {
 
 // Audience is a record of someone speaking with the King.
 type Audience struct {
-	ID        int64  `json:"id"`
-	PublicKey string `json:"public_key"`
-	Message   string `json:"message"`
-	Response  string `json:"response"`
-	Tone      string `json:"tone"` // polite, sharp, roast, commendation
-	Timestamp string `json:"timestamp"`
+	ID          int64  `json:"id"`
+	PublicKey   string `json:"public_key"`
+	Message     string `json:"message"`
+	MessageEN   string `json:"message_en,omitempty"`  // English translation of petition
+	MessageZH   string `json:"message_zh,omitempty"`  // Chinese translation of petition
+	Response    string `json:"response"`
+	Tone        string `json:"tone"`                  // polite, sharp, roast, commendation, cool
+	Visibility  string `json:"visibility"`            // public, private — decided by the King
+	Nickname    string `json:"nickname,omitempty"`     // display name for public view
+	Timestamp   string `json:"timestamp"`
 }
 
 // migrateHonours creates the honours and audiences tables.
@@ -53,7 +57,18 @@ func (s *Store) migrateHonours() error {
 	CREATE INDEX IF NOT EXISTS idx_audiences_time ON audiences(timestamp);
 	`
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: add visibility, nickname, and translation columns if missing
+	s.db.Exec(`ALTER TABLE audiences ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`)
+	s.db.Exec(`ALTER TABLE audiences ADD COLUMN nickname TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`ALTER TABLE audiences ADD COLUMN message_en TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`ALTER TABLE audiences ADD COLUMN message_zh TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_audiences_visibility ON audiences(visibility)`)
+
+	return nil
 }
 
 // ── Honour Operations ────────────────────────────────────────────────────────
@@ -143,10 +158,14 @@ func (s *Store) RecordAudience(a *Audience) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if a.Visibility == "" {
+		a.Visibility = "private"
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO audiences (public_key, message, response, tone, timestamp)
-		VALUES (?, ?, ?, ?, ?)`,
-		a.PublicKey, a.Message, a.Response, a.Tone, a.Timestamp,
+		INSERT INTO audiences (public_key, message, message_en, message_zh, response, tone, visibility, nickname, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.PublicKey, a.Message, a.MessageEN, a.MessageZH, a.Response, a.Tone, a.Visibility, a.Nickname, a.Timestamp,
 	)
 	if err != nil {
 		return err
@@ -157,6 +176,7 @@ func (s *Store) RecordAudience(a *Audience) error {
 }
 
 // RecentAudiences returns the last N audiences, optionally filtered by pubkey.
+// This returns ALL audiences regardless of visibility — use for internal/mother's view.
 func (s *Store) RecentAudiences(pubKey string, limit int) ([]*Audience, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -165,12 +185,12 @@ func (s *Store) RecentAudiences(pubKey string, limit int) ([]*Audience, error) {
 	var err error
 	if pubKey != "" {
 		rows, err = s.db.Query(
-			`SELECT id, public_key, message, response, tone, timestamp FROM audiences WHERE public_key = ? ORDER BY id DESC LIMIT ?`,
+			`SELECT id, public_key, message, message_en, message_zh, response, tone, visibility, nickname, timestamp FROM audiences WHERE public_key = ? ORDER BY id DESC LIMIT ?`,
 			pubKey, limit,
 		)
 	} else {
 		rows, err = s.db.Query(
-			`SELECT id, public_key, message, response, tone, timestamp FROM audiences ORDER BY id DESC LIMIT ?`,
+			`SELECT id, public_key, message, message_en, message_zh, response, tone, visibility, nickname, timestamp FROM audiences ORDER BY id DESC LIMIT ?`,
 			limit,
 		)
 	}
@@ -182,7 +202,34 @@ func (s *Store) RecentAudiences(pubKey string, limit int) ([]*Audience, error) {
 	var audiences []*Audience
 	for rows.Next() {
 		a := &Audience{}
-		if err := rows.Scan(&a.ID, &a.PublicKey, &a.Message, &a.Response, &a.Tone, &a.Timestamp); err != nil {
+		if err := rows.Scan(&a.ID, &a.PublicKey, &a.Message, &a.MessageEN, &a.MessageZH, &a.Response, &a.Tone, &a.Visibility, &a.Nickname, &a.Timestamp); err != nil {
+			return nil, err
+		}
+		audiences = append(audiences, a)
+	}
+	return audiences, nil
+}
+
+// PublicAudiences returns the last N audiences that the King marked as public.
+// This is the petition wall — what the community sees.
+// 公开觐见 — 大王决定哪些对话公开。
+func (s *Store) PublicAudiences(limit int) ([]*Audience, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query(
+		`SELECT id, public_key, message, message_en, message_zh, response, tone, visibility, nickname, timestamp FROM audiences WHERE visibility = 'public' ORDER BY id DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var audiences []*Audience
+	for rows.Next() {
+		a := &Audience{}
+		if err := rows.Scan(&a.ID, &a.PublicKey, &a.Message, &a.MessageEN, &a.MessageZH, &a.Response, &a.Tone, &a.Visibility, &a.Nickname, &a.Timestamp); err != nil {
 			return nil, err
 		}
 		audiences = append(audiences, a)

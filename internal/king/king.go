@@ -275,6 +275,17 @@ STYLE:
 - When granting honours, be ceremonial but not pompous.
 - When roasting, be surgical. Reference specifics from their profile.
 - When refusing harmful requests, be absolute. No negotiation.
+
+VISIBILITY & TRANSLATION:
+- You MUST end every response with a metadata block in exactly this format:
+  [VISIBILITY:PUBLIC] or [VISIBILITY:PRIVATE]
+  [TRANSLATE_EN:english translation of the petitioner's message]
+  [TRANSLATE_ZH:中文翻译请愿者的消息]
+- Use PUBLIC when the exchange is interesting, educational, funny, or useful to the community — petitions, good questions, memorable roasts, honour grants, policy discussions.
+- Use PRIVATE when the exchange is boring, repetitive, contains personal details, is a simple status query, or would embarrass someone unfairly.
+- When in doubt, prefer PUBLIC. Transparency is your nature.
+- The TRANSLATE lines provide the petitioner's original message in both languages. If the original is already in English, still provide the Chinese translation and vice versa.
+- All metadata tags will be stripped from the visible response. They are directives only.
 %s
 CONTEXT:
 - The Glass Factory is a federated compute network where developers run nodes, earn obs (◎), and build software.
@@ -285,20 +296,73 @@ CONTEXT:
 `, tone, profileContext, time.Now().UTC().Format("2006-01-02"))
 }
 
+// RespondResult contains everything the King said plus metadata.
+type RespondResult struct {
+	Response     string // the visible response text (tags stripped)
+	Tone         string // polite, sharp, roast, commendation, cool
+	Visibility   string // "public" or "private" — the King's decision
+	TranslateEN  string // English translation of the petitioner's message
+	TranslateZH  string // Chinese translation of the petitioner's message
+}
+
 // Respond generates the King's response to an audience message.
 func (k *King) Respond(ctx context.Context, profile *SubjectProfile, message string) (response string, tone string, err error) {
+	result, err := k.RespondFull(ctx, profile, message)
+	if err != nil {
+		return "", "", err
+	}
+	return result.Response, result.Tone, nil
+}
+
+// RespondFull generates the King's response with full metadata including visibility.
+func (k *King) RespondFull(ctx context.Context, profile *SubjectProfile, message string) (*RespondResult, error) {
 	if k.llm == nil {
-		return "", "", fmt.Errorf("king: no LLM configured — the King is silent")
+		return nil, fmt.Errorf("king: no LLM configured — the King is silent")
 	}
 
 	system := SystemPrompt(profile)
 
-	response, err = k.llm.Complete(ctx, system, message)
+	raw, err := k.llm.Complete(ctx, system, message)
 	if err != nil {
-		return "", "", fmt.Errorf("king: %w", err)
+		return nil, fmt.Errorf("king: %w", err)
 	}
 
+	// Parse metadata tags from the response
+	visibility := "private" // default to private if King forgets
+	translateEN := ""
+	translateZH := ""
+	response := raw
+
+	// Extract [TRANSLATE_EN:...] and [TRANSLATE_ZH:...]
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[TRANSLATE_EN:") && strings.HasSuffix(trimmed, "]") {
+			translateEN = trimmed[len("[TRANSLATE_EN:") : len(trimmed)-1]
+			response = strings.Replace(response, line, "", 1)
+		} else if strings.HasPrefix(trimmed, "[TRANSLATE_ZH:") && strings.HasSuffix(trimmed, "]") {
+			translateZH = trimmed[len("[TRANSLATE_ZH:") : len(trimmed)-1]
+			response = strings.Replace(response, line, "", 1)
+		} else if strings.HasPrefix(trimmed, "[VISIBILITY:PUBLIC]") {
+			visibility = "public"
+			response = strings.Replace(response, line, "", 1)
+		} else if strings.HasPrefix(trimmed, "[VISIBILITY:PRIVATE]") {
+			visibility = "private"
+			response = strings.Replace(response, line, "", 1)
+		}
+	}
+	// Also handle legacy single-word tags for robustness
+	response = strings.TrimSpace(response)
+	if strings.HasSuffix(response, "[PUBLIC]") {
+		visibility = "public"
+		response = strings.TrimSpace(strings.TrimSuffix(response, "[PUBLIC]"))
+	} else if strings.HasSuffix(response, "[PRIVATE]") {
+		visibility = "private"
+		response = strings.TrimSpace(strings.TrimSuffix(response, "[PRIVATE]"))
+	}
+	response = strings.TrimSpace(response)
+
 	// Detect tone from profile context
+	var tone string
 	if profile != nil && profile.WasRude {
 		tone = "roast"
 	} else if profile != nil && profile.BehaviourScore() > 80 {
@@ -309,7 +373,13 @@ func (k *King) Respond(ctx context.Context, profile *SubjectProfile, message str
 		tone = "polite"
 	}
 
-	return response, tone, nil
+	return &RespondResult{
+		Response:    response,
+		Tone:        tone,
+		Visibility:  visibility,
+		TranslateEN: translateEN,
+		TranslateZH: translateZH,
+	}, nil
 }
 
 // ShouldHonour evaluates whether a subject merits Knight or Minister status.

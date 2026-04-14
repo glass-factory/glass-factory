@@ -1149,38 +1149,54 @@ func main() {
 		}
 
 		ctx := r.Context()
-		response, tone, err := aiKing.Respond(ctx, profile, req.Message)
+		result, err := aiKing.RespondFull(ctx, profile, req.Message)
 		if err != nil {
 			log.Printf("king: audience error: %v", err)
 			http.Error(w, biErr("the King is indisposed", "大王身体不适"), http.StatusInternalServerError)
 			return
 		}
 
-		// Record the audience
+		// Resolve nickname for public display
+		nickname := ""
+		if req.PublicKey != "" {
+			if honour, _ := store.GetHonour(req.PublicKey); honour != nil && honour.Nickname != "" {
+				nickname = honour.Nickname
+			} else if node, _ := store.GetNode(req.PublicKey); node != nil && node.Handle != "" {
+				nickname = node.Handle
+			}
+		}
+
+		// Record the audience with the King's visibility decision and translations
 		audience := &persist.Audience{
-			PublicKey: req.PublicKey,
-			Message:   req.Message,
-			Response:  response,
-			Tone:      tone,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			PublicKey:  req.PublicKey,
+			Message:    req.Message,
+			MessageEN:  result.TranslateEN,
+			MessageZH:  result.TranslateZH,
+			Response:   result.Response,
+			Tone:       result.Tone,
+			Visibility: result.Visibility,
+			Nickname:   nickname,
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := store.RecordAudience(audience); err != nil {
 			log.Printf("king: record audience: %v", err)
 		}
+
+		log.Printf("king: audience from %.16s — tone=%s visibility=%s", req.PublicKey, result.Tone, result.Visibility)
 
 		// Check if the King should grant an honour
 		if req.PublicKey != "" && profile.Rank == king.RankSubject {
 			suggestedRank, reason := king.ShouldHonour(profile)
 			if suggestedRank != king.RankSubject {
 				log.Printf("king: %s merits %s — %s", req.PublicKey[:16], suggestedRank, reason)
-				// The King will name them in a follow-up audience
 			}
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"response":  response,
-			"tone":      tone,
-			"timestamp": audience.Timestamp,
+			"response":   result.Response,
+			"tone":       result.Tone,
+			"visibility": result.Visibility,
+			"timestamp":  audience.Timestamp,
 		})
 	})
 
@@ -1310,7 +1326,7 @@ func main() {
 		})
 	})
 
-	// Recent audiences (public — the King's court is transparent)
+	// Recent audiences for a specific user (their own history)
 	mux.HandleFunc("GET /api/king/audiences", func(w http.ResponseWriter, r *http.Request) {
 		pubKey := r.URL.Query().Get("pubkey")
 		audiences, err := store.RecentAudiences(pubKey, 50)
@@ -1321,6 +1337,102 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"audiences": audiences,
 			"count":     len(audiences),
+		})
+	})
+
+	// ── Petition Wall (public audiences) ─────────────────────────────────────
+
+	// The King decides what the public sees. These are the exchanges he deemed
+	// interesting, educational, or entertaining enough to share.
+	// 请愿墙 — 大王决定哪些对话公开展示。
+	mux.HandleFunc("GET /api/king/petitions", func(w http.ResponseWriter, r *http.Request) {
+		limit := 50
+		petitions, err := store.PublicAudiences(limit)
+		if err != nil {
+			http.Error(w, biErr("failed to read petitions", "请愿记录读取失败"), http.StatusInternalServerError)
+			return
+		}
+
+		// Redact public keys to short hashes for privacy
+		type publicPetition struct {
+			ID         int64  `json:"id"`
+			Petitioner string `json:"petitioner"`     // nickname or truncated key
+			Message    string `json:"message"`         // original message
+			MessageEN  string `json:"message_en"`      // English translation
+			MessageZH  string `json:"message_zh"`      // Chinese translation
+			Response   string `json:"response"`        // King's response
+			Tone       string `json:"tone"`
+			Timestamp  string `json:"timestamp"`
+		}
+
+		var out []publicPetition
+		for _, p := range petitions {
+			name := p.Nickname
+			if name == "" && len(p.PublicKey) >= 12 {
+				name = p.PublicKey[:12] + "…"
+			} else if name == "" {
+				name = "anonymous / 匿名"
+			}
+			out = append(out, publicPetition{
+				ID:         p.ID,
+				Petitioner: name,
+				Message:    p.Message,
+				MessageEN:  p.MessageEN,
+				MessageZH:  p.MessageZH,
+				Response:   p.Response,
+				Tone:       p.Tone,
+				Timestamp:  p.Timestamp,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"petitions":    out,
+			"count":        len(out),
+			"count_zh":     fmt.Sprintf("%d条公开请愿", len(out)),
+		})
+	})
+
+	// ── Mother's Court (太后 sees everything) ────────────────────────────────
+
+	// The King's mother sees all audiences — public and private.
+	// Protected by MOTHER_SECRET env var.
+	motherSecret := os.Getenv("MOTHER_SECRET")
+	mux.HandleFunc("GET /api/king/court", func(w http.ResponseWriter, r *http.Request) {
+		if motherSecret == "" {
+			http.Error(w, biErr("the court is sealed", "宫廷已封"), http.StatusForbidden)
+			return
+		}
+		secret := r.Header.Get("X-Mother-Secret")
+		if secret == "" {
+			secret = r.URL.Query().Get("secret")
+		}
+		if secret != motherSecret {
+			http.Error(w, biErr("太后 does not know you", "太后不认识你"), http.StatusForbidden)
+			return
+		}
+
+		audiences, err := store.RecentAudiences("", 200)
+		if err != nil {
+			http.Error(w, biErr("failed to read court records", "宫廷记录读取失败"), http.StatusInternalServerError)
+			return
+		}
+
+		// Stats
+		totalPublic := 0
+		totalPrivate := 0
+		for _, a := range audiences {
+			if a.Visibility == "public" {
+				totalPublic++
+			} else {
+				totalPrivate++
+			}
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"audiences":     audiences,
+			"count":         len(audiences),
+			"public_count":  totalPublic,
+			"private_count": totalPrivate,
+			"note":          "太后看一切 — the mother sees all",
 		})
 	})
 
