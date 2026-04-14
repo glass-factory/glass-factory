@@ -15,6 +15,7 @@ import (
 
 	"glassfactory/internal/knowledge"
 	"glassfactory/internal/lending"
+	"glassfactory/internal/persist"
 )
 
 // ── Inline registry (extracted from forge/components/universal.go) ───────────
@@ -181,9 +182,32 @@ func main() {
 		factoryID = "https://thedarkfactory.dev"
 	}
 
+	dbPath := os.Getenv("HQ_DB_PATH")
+	if dbPath == "" {
+		dbPath = "glassfactory.db"
+	}
+
+	store, err := persist.Open(dbPath)
+	if err != nil {
+		log.Fatalf("persist: %v", err)
+	}
+	defer store.Close()
+	store.LogRecovery()
+
 	reg := NewRegistry(factoryID)
 	knowledgeStore := knowledge.NewMemStore()
 	ledger := lending.NewLedger()
+
+	// Sync persisted balances into lending ledger on startup
+	if bals, err := store.LoadBalancesMap(); err == nil {
+		for pk, bal := range bals {
+			ledger.RegisterMaker(pk)
+			ledger.SetBalance(pk, bal)
+		}
+		if len(bals) > 0 {
+			log.Printf("glassfactory: synced %d balances into ledger from disk", len(bals))
+		}
+	}
 
 	// Seed with the basic-sentinel component
 	reg.Register(&ComponentDescriptor{
@@ -205,36 +229,16 @@ func main() {
 		SourceRegistry: factoryID,
 	})
 
-	// In-memory factory node store
-	type FactoryNode struct {
-		PublicKey    string   `json:"public_key"`
-		Handle      string   `json:"handle"`
-		Port        int      `json:"port"`
-		Status      string   `json:"status"`
-		Models      []string `json:"models"`
-		QueueLen    int      `json:"queue_len"`
-		CacheBytes  int64    `json:"cache_bytes"`
-		UptimeSecs  int64    `json:"uptime_secs"`
-		RegisteredAt string  `json:"registered_at"`
-		LastSeen    string   `json:"last_seen"`
-		PairedUser  string   `json:"paired_user,omitempty"`
-	}
-
-	var factoryMu sync.RWMutex
-	factories := make(map[string]*FactoryNode)
-
 	mux := http.NewServeMux()
 
 	// Registry endpoints
 	mux.HandleFunc("GET /api/registry/health", func(w http.ResponseWriter, r *http.Request) {
-		factoryMu.RLock()
-		nodeCount := len(factories)
-		factoryMu.RUnlock()
+		nodeCount, _ := store.NodeCount()
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":     "ok",
 			"registry":   "glass-factory",
 			"factory_id": factoryID,
-			"version":    "0.1.0",
+			"version":    "0.2.0",
 			"components": reg.Count(),
 			"peers":      len(reg.Peers()),
 			"knowledge":  knowledgeStore.Count(),
@@ -407,25 +411,29 @@ func main() {
 		// TODO: verify Ed25519 signature from X-Factory-Signature header
 
 		now := time.Now().UTC().Format(time.RFC3339)
-		factoryMu.Lock()
-		existing, exists := factories[req.PublicKey]
-		if exists {
-			existing.Handle = req.Handle
+		handle := persist.SanitizeHandle(req.Handle)
+		existing, _ := store.GetNode(req.PublicKey)
+		if existing != nil {
+			existing.Handle = handle
 			existing.Port = req.Port
 			existing.LastSeen = now
-			factoryMu.Unlock()
-			log.Printf("factory re-registered: %s (%.8s)", req.Handle, req.PublicKey)
+			if err := store.SaveNode(existing); err != nil {
+				log.Printf("persist error: %v", err)
+			}
+			log.Printf("factory re-registered: %s (%.8s)", handle, req.PublicKey)
 		} else {
-			factories[req.PublicKey] = &FactoryNode{
+			node := &persist.FactoryNode{
 				PublicKey:    req.PublicKey,
-				Handle:      req.Handle,
+				Handle:      handle,
 				Port:        req.Port,
 				Status:      "idle",
 				RegisteredAt: now,
 				LastSeen:     now,
 			}
-			factoryMu.Unlock()
-			log.Printf("factory registered: %s (%.8s)", req.Handle, req.PublicKey)
+			if err := store.SaveNode(node); err != nil {
+				log.Printf("persist error: %v", err)
+			}
+			log.Printf("factory registered: %s (%.8s)", handle, req.PublicKey)
 		}
 
 		w.WriteHeader(http.StatusCreated)
@@ -454,20 +462,20 @@ func main() {
 		}
 
 		now := time.Now().UTC().Format(time.RFC3339)
-		factoryMu.Lock()
-		node, exists := factories[hb.PublicKey]
-		if !exists {
-			factoryMu.Unlock()
+		node, _ := store.GetNode(hb.PublicKey)
+		if node == nil {
 			http.Error(w, `{"error":"factory not registered — call /api/factory/register first"}`, http.StatusForbidden)
 			return
-		} else {
-			node.Status = hb.Status
-			node.Models = hb.Models
-			node.QueueLen = hb.QueueLen
-			node.CacheBytes = hb.CacheBytes
-			node.UptimeSecs = hb.UptimeSecs
-			node.LastSeen = now
-			factoryMu.Unlock()
+		}
+
+		node.Status = hb.Status
+		node.Models = hb.Models
+		node.QueueLen = hb.QueueLen
+		node.CacheBytes = hb.CacheBytes
+		node.UptimeSecs = hb.UptimeSecs
+		node.LastSeen = now
+		if err := store.SaveNode(node); err != nil {
+			log.Printf("persist heartbeat error: %v", err)
 		}
 
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -523,10 +531,9 @@ func main() {
 		// TODO: verify Ed25519 signature against the payload
 
 		now := time.Now().UTC().Format(time.RFC3339)
-		factoryMu.Lock()
-		node, exists := factories[pubKey]
-		if !exists {
-			factories[pubKey] = &FactoryNode{
+		node, _ := store.GetNode(pubKey)
+		if node == nil {
+			node = &persist.FactoryNode{
 				PublicKey:    pubKey,
 				Status:      "paired",
 				RegisteredAt: now,
@@ -537,33 +544,43 @@ func main() {
 			node.PairedUser = "early-adopter"
 			node.LastSeen = now
 		}
-		factoryMu.Unlock()
+		if err := store.SaveNode(node); err != nil {
+			log.Printf("persist pair error: %v", err)
+		}
 
-		// Grant early adopter tokens and register in ledger
-		ledger.RegisterMaker(pubKey)
+		// Grant early adopter tokens — persisted to SQLite
 		earlyAdopterGrant := int64(1000)
-		ledger.SetBalance(pubKey, ledger.Balance(pubKey)+earlyAdopterGrant)
+		newBal, err := store.AdjustBalance(pubKey, earlyAdopterGrant, "pair", "early adopter grant")
+		if err != nil {
+			log.Printf("persist token grant error: %v", err)
+		}
 
-		log.Printf("factory paired: %.8s (granted %d tokens)", pubKey, earlyAdopterGrant)
+		// Sync into lending ledger
+		ledger.RegisterMaker(pubKey)
+		ledger.SetBalance(pubKey, newBal)
+
+		log.Printf("factory paired: %.8s (granted %d tokens, balance %d)", pubKey, earlyAdopterGrant, newBal)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":        "paired",
 			"public_key":    pubKey,
 			"fingerprint":   pubKey[:16],
 			"tokens_granted": earlyAdopterGrant,
-			"balance":       ledger.Balance(pubKey),
+			"balance":       newBal,
 			"message":       "Welcome to the Glass Factory. 1000 tokens granted. 欢迎加入玻璃工厂。",
 		})
 	})
 
 	// List all registered factory nodes
 	mux.HandleFunc("GET /api/factory/nodes", func(w http.ResponseWriter, r *http.Request) {
-		factoryMu.RLock()
-		nodes := make([]*FactoryNode, 0, len(factories))
-		for _, n := range factories {
-			nodes = append(nodes, n)
+		nodes, err := store.AllNodes()
+		if err != nil {
+			log.Printf("persist AllNodes error: %v", err)
+			nodes = nil
 		}
-		factoryMu.RUnlock()
+		if nodes == nil {
+			nodes = []*persist.FactoryNode{}
+		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"nodes": nodes,
 			"count": len(nodes),
@@ -589,11 +606,8 @@ func main() {
 		}
 
 		// Only serve key to registered factories
-		factoryMu.RLock()
-		_, registered := factories[pubKey]
-		factoryMu.RUnlock()
-
-		if !registered {
+		node, _ := store.GetNode(pubKey)
+		if node == nil {
 			http.Error(w, `{"error":"factory not registered — register first"}`, http.StatusForbidden)
 			return
 		}
@@ -618,8 +632,8 @@ func main() {
 			http.Error(w, `{"error":"public_key required (64 hex chars)"}`, http.StatusBadRequest)
 			return
 		}
-		bal := ledger.Balance(pubKey)
-		rep, _ := ledger.GetReputation(pubKey)
+		bal, _ := store.GetBalance(pubKey)
+		rep, _ := store.GetReputation(pubKey)
 		score := 0.0
 		if rep != nil {
 			score = rep.Score
@@ -649,22 +663,28 @@ func main() {
 		}
 
 		// Only registered factories can earn
-		factoryMu.RLock()
-		_, registered := factories[req.PublicKey]
-		factoryMu.RUnlock()
-		if !registered {
+		earnNode, _ := store.GetNode(req.PublicKey)
+		if earnNode == nil {
 			http.Error(w, `{"error":"factory not registered"}`, http.StatusForbidden)
 			return
 		}
 
-		ledger.RegisterMaker(req.PublicKey) // idempotent
-		ledger.SetBalance(req.PublicKey, ledger.Balance(req.PublicKey)+req.Amount)
+		reason := fmt.Sprintf("job=%s %s", req.JobID, req.Reason)
+		newBal, err := store.AdjustBalance(req.PublicKey, req.Amount, "earn", reason)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
 
-		log.Printf("tokens earned: %.8s +%d (job=%s reason=%s)", req.PublicKey, req.Amount, req.JobID, req.Reason)
+		// Sync into lending ledger
+		ledger.RegisterMaker(req.PublicKey)
+		ledger.SetBalance(req.PublicKey, newBal)
+
+		log.Printf("tokens earned: %.8s +%d bal=%d (job=%s reason=%s)", req.PublicKey, req.Amount, newBal, req.JobID, req.Reason)
 		json.NewEncoder(w).Encode(map[string]any{
 			"public_key": req.PublicKey,
 			"earned":     req.Amount,
-			"balance":    ledger.Balance(req.PublicKey),
+			"balance":    newBal,
 		})
 	})
 
@@ -684,25 +704,29 @@ func main() {
 			return
 		}
 
-		bal := ledger.Balance(req.PublicKey)
-		if bal < req.Amount {
+		newBal, err := store.AdjustBalance(req.PublicKey, -req.Amount, "spend", req.Purpose)
+		if err != nil {
+			bal, _ := store.GetBalance(req.PublicKey)
 			http.Error(w, fmt.Sprintf(`{"error":"insufficient tokens: have %d, need %d"}`, bal, req.Amount), http.StatusPaymentRequired)
 			return
 		}
 
-		ledger.SetBalance(req.PublicKey, bal-req.Amount)
-		log.Printf("tokens spent: %.8s -%d (purpose=%s)", req.PublicKey, req.Amount, req.Purpose)
+		// Sync into lending ledger
+		ledger.SetBalance(req.PublicKey, newBal)
+
+		log.Printf("tokens spent: %.8s -%d bal=%d (purpose=%s)", req.PublicKey, req.Amount, newBal, req.Purpose)
 		json.NewEncoder(w).Encode(map[string]any{
 			"public_key": req.PublicKey,
 			"spent":      req.Amount,
-			"balance":    ledger.Balance(req.PublicKey),
+			"balance":    newBal,
 		})
 	})
 
 	// Network token stats
 	mux.HandleFunc("GET /api/tokens/stats", func(w http.ResponseWriter, r *http.Request) {
+		totalTokens, _ := store.TotalTokens()
 		json.NewEncoder(w).Encode(map[string]any{
-			"total_tokens":     ledger.TotalNetworkTokens(),
+			"total_tokens":     totalTokens,
 			"outstanding_debt": ledger.TotalOutstandingDebt(),
 		})
 	})
