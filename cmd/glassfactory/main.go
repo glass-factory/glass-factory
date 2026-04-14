@@ -859,6 +859,198 @@ func main() {
 		})
 	})
 
+	// ── Build Submission Endpoints ────────────────────────────────────────────
+
+	// Submit a spec to the network
+	mux.HandleFunc("POST /api/build/submit", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Spec        string `json:"spec"`
+			PublicKey   string `json:"public_key"`
+			Destination string `json:"destination"` // network, local, company
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if len(req.Spec) < 10 {
+			http.Error(w, `{"error":"spec too short — at least 10 characters"}`, http.StatusBadRequest)
+			return
+		}
+		if len(req.Spec) > 50000 {
+			http.Error(w, `{"error":"spec too long — 50,000 characters max"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Destination == "" {
+			req.Destination = "network"
+		}
+
+		cost := persist.EstimateCost(req.Spec)
+		lang := persist.DetectLanguage(req.Spec)
+
+		// If submitter identified, deduct ◎
+		if req.PublicKey != "" && req.Destination == "network" {
+			bal, err := store.GetBalance(req.PublicKey)
+			if err != nil {
+				http.Error(w, `{"error":"balance check failed"}`, http.StatusInternalServerError)
+				return
+			}
+			if bal < cost {
+				http.Error(w, fmt.Sprintf(`{"error":"insufficient obs: have ◎%d, need ◎%d"}`, bal, cost), http.StatusPaymentRequired)
+				return
+			}
+			// Deduct via signed chain
+			_, err = store.AppendSignedEvent(req.PublicKey, -cost, "spend", "build submission", hqPriv)
+			if err != nil {
+				log.Printf("build: deduct failed for %s: %v", req.PublicKey[:16], err)
+				http.Error(w, `{"error":"obol deduction failed"}`, http.StatusInternalServerError)
+				return
+			}
+			log.Printf("build: ◎%d deducted from %s for build", cost, req.PublicKey[:16])
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		build := &persist.Build{
+			ID:          persist.GenerateBuildID(),
+			PublicKey:   req.PublicKey,
+			Spec:        req.Spec,
+			Destination: req.Destination,
+			Status:      persist.BuildQueued,
+			Cost:        cost,
+			Language:    lang,
+			SubmittedAt: now,
+			UpdatedAt:   now,
+		}
+		if err := store.SubmitBuild(build); err != nil {
+			http.Error(w, `{"error":"failed to queue build"}`, http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("build: queued %s (◎%d, %s, dest=%s)", build.ID, cost, lang, req.Destination)
+		json.NewEncoder(w).Encode(map[string]any{
+			"build_id":    build.ID,
+			"status":      "queued",
+			"cost":        cost,
+			"language":    lang,
+			"destination": req.Destination,
+			"message":     fmt.Sprintf("build %s queued — ◎%d charged", build.ID, cost),
+		})
+	})
+
+	// Check build status
+	mux.HandleFunc("GET /api/build/status/", func(w http.ResponseWriter, r *http.Request) {
+		buildID := strings.TrimPrefix(r.URL.Path, "/api/build/status/")
+		if buildID == "" {
+			http.Error(w, `{"error":"build_id required"}`, http.StatusBadRequest)
+			return
+		}
+		build, err := store.GetBuild(buildID)
+		if err != nil {
+			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if build == nil {
+			http.Error(w, `{"error":"build not found"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(build)
+	})
+
+	// Build queue stats
+	mux.HandleFunc("GET /api/build/queue", func(w http.ResponseWriter, r *http.Request) {
+		queued, running, complete, failed, _ := store.BuildStats()
+		json.NewEncoder(w).Encode(map[string]any{
+			"queued":   queued,
+			"running":  running,
+			"complete": complete,
+			"failed":   failed,
+		})
+	})
+
+	// Factory node picks up next build
+	mux.HandleFunc("POST /api/build/claim", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PublicKey string `json:"public_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PublicKey == "" {
+			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Verify the factory is registered
+		node, err := store.GetNode(req.PublicKey)
+		if err != nil || node == nil {
+			http.Error(w, `{"error":"unknown factory — register first"}`, http.StatusForbidden)
+			return
+		}
+
+		build, err := store.NextQueuedBuild()
+		if err != nil {
+			http.Error(w, `{"error":"queue read failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if build == nil {
+			json.NewEncoder(w).Encode(map[string]any{
+				"status":  "empty",
+				"message": "no builds in queue",
+			})
+			return
+		}
+
+		if err := store.AssignBuild(build.ID, req.PublicKey); err != nil {
+			http.Error(w, `{"error":"assignment failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("build: %s assigned to %s", build.ID, req.PublicKey[:16])
+		json.NewEncoder(w).Encode(map[string]any{
+			"build_id": build.ID,
+			"spec":     build.Spec,
+			"language": build.Language,
+			"cost":     build.Cost,
+			"status":   "assigned",
+		})
+	})
+
+	// Factory reports build complete
+	mux.HandleFunc("POST /api/build/complete", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BuildID   string `json:"build_id"`
+			PublicKey string `json:"public_key"`
+			Result    string `json:"result"`
+			Success   bool   `json:"success"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BuildID == "" {
+			http.Error(w, `{"error":"build_id required"}`, http.StatusBadRequest)
+			return
+		}
+
+		build, _ := store.GetBuild(req.BuildID)
+		if build == nil {
+			http.Error(w, `{"error":"build not found"}`, http.StatusNotFound)
+			return
+		}
+
+		if req.Success {
+			store.UpdateBuildStatus(req.BuildID, persist.BuildComplete, req.Result)
+
+			// Pay the factory that did the work
+			if req.PublicKey != "" && build.Cost > 0 {
+				earned := build.Cost * 80 / 100 // factory gets 80% of the build cost
+				_, err := store.AppendSignedEvent(req.PublicKey, earned, "earn", fmt.Sprintf("build %s completed", req.BuildID), hqPriv)
+				if err != nil {
+					log.Printf("build: earn failed for %s: %v", req.PublicKey[:16], err)
+				} else {
+					log.Printf("build: ◎%d earned by %s for build %s", earned, req.PublicKey[:16], req.BuildID)
+				}
+			}
+
+			json.NewEncoder(w).Encode(map[string]any{"status": "complete", "build_id": req.BuildID})
+		} else {
+			store.UpdateBuildStatus(req.BuildID, persist.BuildFailed, req.Result)
+			json.NewEncoder(w).Encode(map[string]any{"status": "failed", "build_id": req.BuildID})
+		}
+	})
+
 	// ── AI King (AI王) Endpoints ─────────────────────────────────────────────
 
 	// Request an audience with the King
