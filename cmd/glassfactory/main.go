@@ -297,6 +297,14 @@ func main() {
 		{Name: "build-queue", URL: selfURL + "/api/build/queue", IntervalSecs: 60},
 		{Name: "chain-integrity", URL: selfURL + "/api/tokens/chain/verify", IntervalSecs: 300},
 	}
+	// If the King has an LLM endpoint, monitor it too
+	if llmEndpoint := os.Getenv("KING_LLM_ENDPOINT"); llmEndpoint != "" {
+		// Strip the chat/completions path — just check if the model server is reachable
+		modelsURL := strings.TrimSuffix(llmEndpoint, "/chat/completions") + "/models"
+		sentinelChecks = append(sentinelChecks, sentinel.Check{
+			Name: "ai-king-llm", URL: modelsURL, IntervalSecs: 60, TimeoutSecs: 5,
+		})
+	}
 	sentry := sentinel.New(sentinelChecks, func(result sentinel.CheckResult) {
 		log.Printf("sentinel: ALERT %s failed — %s (status=%d, latency=%s)",
 			result.CheckName, result.Error, result.Status, result.Latency)
