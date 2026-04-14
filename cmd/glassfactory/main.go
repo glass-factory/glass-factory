@@ -197,7 +197,7 @@ func main() {
 	defer store.Close()
 	store.LogRecovery()
 
-	// Load or generate HQ Ed25519 signing key for the token chain.
+	// Load or generate HQ Ed25519 signing key for the obol chain.
 	// Set HQ_SIGNING_KEY env var (hex-encoded 128-char private key) for production.
 	// If not set, generates an ephemeral key (fine for dev, not for production).
 	var hqPriv ed25519.PrivateKey
@@ -219,7 +219,7 @@ func main() {
 	// Verify chain integrity on startup
 	if lastSeq, err := store.ChainIntegrity(hqPub); err != nil {
 		log.Printf("glassfactory: CHAIN INTEGRITY FAILURE at seq %d: %v", lastSeq, err)
-		log.Printf("glassfactory: Token chain has been tampered with. Investigate immediately.")
+		log.Printf("glassfactory: Obol chain has been tampered with. Investigate immediately.")
 	} else if lastSeq > 0 {
 		log.Printf("glassfactory: chain verified — %d events, integrity OK ✓", lastSeq)
 	}
@@ -596,12 +596,12 @@ func main() {
 			log.Printf("persist pair error: %v", err)
 		}
 
-		// Grant early adopter tokens — signed hash chain entry
+		// Grant early adopter obs — signed hash chain entry
 		earlyAdopterGrant := int64(1000)
 		ev, err := store.AppendSignedEvent(pubKey, earlyAdopterGrant, "pair", "early adopter grant", hqPriv)
 		if err != nil {
 			log.Printf("signed event error: %v", err)
-			http.Error(w, `{"error":"token grant failed"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error":"obol grant failed"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -612,16 +612,16 @@ func main() {
 		// Return receipt so factory node can verify independently
 		receipt := ev.ToReceipt(hqPub)
 
-		log.Printf("factory paired: %.8s (granted %d tokens, balance %d, chain seq %d)", pubKey, earlyAdopterGrant, ev.Balance, ev.Seq)
+		log.Printf("factory paired: %.8s (granted ◎%d, balance ◎%d, chain seq %d)", pubKey, earlyAdopterGrant, ev.Balance, ev.Seq)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":        "paired",
 			"public_key":    pubKey,
 			"fingerprint":   pubKey[:16],
-			"tokens_granted": earlyAdopterGrant,
+			"obs_granted":   earlyAdopterGrant,
 			"balance":       ev.Balance,
 			"receipt":       receipt,
-			"message":       "Welcome to the Glass Factory. 1000 tokens granted. 欢迎加入玻璃工厂。",
+			"message":       "Welcome to the Glass Factory. ◎1,000 granted. 欢迎加入玻璃工厂。获得 ◎1,000 奥币。",
 		})
 	})
 
@@ -677,7 +677,7 @@ func main() {
 		})
 	})
 
-	// ── Token economy endpoints ──────────────────────────────────────────
+	// ── Obol economy endpoints ───────────────────────────────────────────
 
 	// Check balance for a factory
 	mux.HandleFunc("GET /api/tokens/balance/", func(w http.ResponseWriter, r *http.Request) {
@@ -699,7 +699,7 @@ func main() {
 		})
 	})
 
-	// Earn tokens — called when a factory completes a build job
+	// Earn obs — called when a factory completes a build job
 	mux.HandleFunc("POST /api/tokens/earn", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			PublicKey string `json:"public_key"`
@@ -735,7 +735,7 @@ func main() {
 		ledger.SetBalance(req.PublicKey, ev.Balance)
 
 		receipt := ev.ToReceipt(hqPub)
-		log.Printf("tokens earned: %.8s +%d bal=%d seq=%d (job=%s)", req.PublicKey, req.Amount, ev.Balance, ev.Seq, req.JobID)
+		log.Printf("obs earned: %.8s +◎%d bal=◎%d seq=%d (job=%s)", req.PublicKey, req.Amount, ev.Balance, ev.Seq, req.JobID)
 		json.NewEncoder(w).Encode(map[string]any{
 			"public_key": req.PublicKey,
 			"earned":     req.Amount,
@@ -744,7 +744,7 @@ func main() {
 		})
 	})
 
-	// Spend tokens — called when a user submits a spec for building
+	// Spend obs — called when a user submits a spec for building
 	mux.HandleFunc("POST /api/tokens/spend", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			PublicKey string `json:"public_key"`
@@ -763,7 +763,7 @@ func main() {
 		ev, err := store.AppendSignedEvent(req.PublicKey, -req.Amount, "spend", req.Purpose, hqPriv)
 		if err != nil {
 			bal, _ := store.GetBalance(req.PublicKey)
-			http.Error(w, fmt.Sprintf(`{"error":"insufficient tokens: have %d, need %d"}`, bal, req.Amount), http.StatusPaymentRequired)
+			http.Error(w, fmt.Sprintf(`{"error":"insufficient obs: have ◎%d, need ◎%d"}`, bal, req.Amount), http.StatusPaymentRequired)
 			return
 		}
 
@@ -771,7 +771,7 @@ func main() {
 		ledger.SetBalance(req.PublicKey, ev.Balance)
 
 		receipt := ev.ToReceipt(hqPub)
-		log.Printf("tokens spent: %.8s -%d bal=%d seq=%d (purpose=%s)", req.PublicKey, req.Amount, ev.Balance, ev.Seq, req.Purpose)
+		log.Printf("obs spent: %.8s -◎%d bal=◎%d seq=%d (purpose=%s)", req.PublicKey, req.Amount, ev.Balance, ev.Seq, req.Purpose)
 		json.NewEncoder(w).Encode(map[string]any{
 			"public_key": req.PublicKey,
 			"spent":      req.Amount,
@@ -780,7 +780,7 @@ func main() {
 		})
 	})
 
-	// Network token stats
+	// Network obol stats
 	mux.HandleFunc("GET /api/tokens/stats", func(w http.ResponseWriter, r *http.Request) {
 		totalTokens, _ := store.TotalTokens()
 		json.NewEncoder(w).Encode(map[string]any{

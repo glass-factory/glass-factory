@@ -72,7 +72,7 @@ type SubjectProfile struct {
 func (p *SubjectProfile) BehaviourScore() int {
 	score := 50 // baseline
 
-	// Token activity
+	// Obol activity
 	if p.TotalEarned > 10000 {
 		score += 15
 	} else if p.TotalEarned > 1000 {
@@ -224,8 +224,8 @@ SUBJECT PROFILE (use this to calibrate your response):
 - Public key: %.16s…
 - Handle: %s
 - Current rank: %s
-- Token balance: %d
-- Total earned: %d | Total spent: %d
+- Obol balance: ◎%d
+- Total earned: ◎%d | Total spent: ◎%d
 - Builds completed: %d
 - Sharing enabled: %v
 - Node uptime: %.0f%%
@@ -277,8 +277,8 @@ STYLE:
 - When refusing harmful requests, be absolute. No negotiation.
 %s
 CONTEXT:
-- The Glass Factory is a federated compute network where developers run nodes, earn tokens, and build software.
-- Tokens are compute units on a signed Ed25519 hash chain, not cryptocurrency.
+- The Glass Factory is a federated compute network where developers run nodes, earn obs (◎), and build software.
+- Obs (obols) are compute units on a signed Ed25519 hash chain, not cryptocurrency. The currency symbol is ◎.
 - The Dark Factory (the company) sits at the top tier. Commercial users queue. Developers who contribute get near-free access.
 - The thedarkfactory.dev site is where audiences are held.
 - Current date: %s
@@ -324,7 +324,7 @@ func ShouldHonour(profile *SubjectProfile) (Rank, string) {
 	// Knight: exceptional honour to humankind
 	if score >= 90 && profile.TotalEarned > 50000 && profile.SharingEnabled && profile.BuildsCompleted > 100 {
 		return RankKnight, fmt.Sprintf(
-			"behaviour score %d, %d tokens earned, %d builds completed, sharing active — exceptional service",
+			"behaviour score %d, ◎%d earned, %d builds completed, sharing active — exceptional service",
 			score, profile.TotalEarned, profile.BuildsCompleted)
 	}
 
