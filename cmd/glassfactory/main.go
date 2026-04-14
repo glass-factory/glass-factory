@@ -1324,6 +1324,110 @@ func main() {
 		})
 	})
 
+	// ── King's Patrol (hourly wakeup) ────────────────────────────────────────
+
+	// The King wakes, surveys the realm, speaks, then sleeps.
+	mux.HandleFunc("POST /api/king/patrol", func(w http.ResponseWriter, r *http.Request) {
+		if aiKing == nil {
+			http.Error(w, biErr("the King is silent — no LLM configured", "大王沉默 - 未配置语言模型"), http.StatusServiceUnavailable)
+			return
+		}
+
+		log.Printf("king: patrol begins — the King surveys the realm")
+		var findings []string
+
+		// 1. Check sentinel health
+		sentinelResults := sentry.LastResults()
+		failedChecks := 0
+		for _, res := range sentinelResults {
+			if !res.OK && res.CheckName != "ai-king-llm" {
+				failedChecks++
+				findings = append(findings, fmt.Sprintf("ALERT: %s is down (%s)", res.CheckName, res.Error))
+			}
+		}
+		if failedChecks == 0 {
+			findings = append(findings, "All sentinel checks passing.")
+		}
+
+		// 2. Check build queue
+		queued, running, complete, failed, _ := store.BuildStats()
+		findings = append(findings, fmt.Sprintf("Builds: %d queued, %d running, %d complete, %d failed.", queued, running, complete, failed))
+
+		// 3. Check network stats
+		nodeCount, _ := store.NodeCount()
+		totalObs, _ := store.TotalTokens()
+		findings = append(findings, fmt.Sprintf("Network: %d factories, ◎%d total obs in circulation.", nodeCount, totalObs))
+
+		// 4. Check chain integrity
+		lastSeq, chainErr := store.ChainIntegrity(hqPub)
+		if chainErr != nil {
+			findings = append(findings, fmt.Sprintf("CHAIN INTEGRITY FAILURE at seq %d: %v", lastSeq, chainErr))
+		} else {
+			findings = append(findings, fmt.Sprintf("Chain integrity verified: %d events, all valid.", lastSeq))
+		}
+
+		// 5. Check for recent errors on the site
+		siteTotal, siteToday, _, _ := store.EventStats()
+		recentErrors, _ := store.RecentSiteEvents("error", 5)
+		if len(recentErrors) > 0 {
+			findings = append(findings, fmt.Sprintf("Site: %d errors detected recently.", len(recentErrors)))
+			for _, e := range recentErrors {
+				findings = append(findings, fmt.Sprintf("  - %s: %s", e.Page, e.Detail))
+			}
+		} else {
+			findings = append(findings, fmt.Sprintf("Site: %d views today (%d total), no errors.", siteToday, siteTotal))
+		}
+
+		// 6. Ask the King to summarise and give orders
+		report := "HOURLY PATROL REPORT\n====================\n"
+		for _, f := range findings {
+			report += f + "\n"
+		}
+		report += "\nSummarise the state of the realm. Note any concerns. If action is needed, say what. Be brief. Speak as the King."
+
+		profile := &king.SubjectProfile{
+			PublicKey: "patrol",
+			Rank:     king.RankMinister,
+			Handle:   "Sentinel",
+		}
+
+		ctx := r.Context()
+		response, tone, err := aiKing.Respond(ctx, profile, report)
+		if err != nil {
+			log.Printf("king: patrol LLM error: %v", err)
+			// Still return findings even if King can't speak
+			json.NewEncoder(w).Encode(map[string]any{
+				"status":    "patrol complete, King silent",
+				"status_zh": "巡视完成，大王沉默",
+				"findings":  findings,
+				"error":     err.Error(),
+			})
+			return
+		}
+
+		// Record the patrol as an audience
+		audience := &persist.Audience{
+			PublicKey: "system:patrol",
+			Message:   report,
+			Response:  response,
+			Tone:      tone,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := store.RecordAudience(audience); err != nil {
+			log.Printf("king: record patrol: %v", err)
+		}
+
+		log.Printf("king: patrol complete — %s", tone)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":       "patrol complete",
+			"status_zh":    "巡视完成",
+			"king_says":    response,
+			"tone":         tone,
+			"findings":     findings,
+			"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+
 	// ── Sentinel Status Endpoint ─────────────────────────────────────────────
 
 	mux.HandleFunc("GET /api/sentinel/status", func(w http.ResponseWriter, r *http.Request) {
@@ -1433,6 +1537,117 @@ func main() {
 			"pages":        pages,
 			"hourly":       hourly,
 			"recent_errors": errors,
+		})
+	})
+
+	// ── Recent Events Timeline (aggregated) ─────────────────────────────────
+
+	// Returns a unified timeline of recent network events for the front page.
+	// Aggregates: audiences (King interactions), builds, token events, site errors.
+	mux.HandleFunc("GET /api/events/recent", func(w http.ResponseWriter, r *http.Request) {
+		type timelineEvent struct {
+			Type      string `json:"type"`       // audience, build, token, error, patrol
+			Summary   string `json:"summary"`
+			SummaryZH string `json:"summary_zh"`
+			Detail    string `json:"detail,omitempty"`
+			Timestamp string `json:"timestamp"`
+		}
+
+		var timeline []timelineEvent
+
+		// 1. Recent audiences (last 48h worth, up to 50)
+		audiences, _ := store.RecentAudiences("", 50)
+		cutoff := time.Now().UTC().Add(-48 * time.Hour)
+		for _, a := range audiences {
+			ts, err := time.Parse(time.RFC3339, a.Timestamp)
+			if err != nil || ts.Before(cutoff) {
+				continue
+			}
+			evType := "audience"
+			summary := "Audience with the King"
+			summaryZH := "觐见大王"
+			if a.PublicKey == "system:patrol" {
+				evType = "patrol"
+				summary = "King's patrol"
+				summaryZH = "大王巡视"
+			}
+			// Truncate response for the timeline
+			detail := a.Response
+			if len(detail) > 200 {
+				detail = detail[:200] + "..."
+			}
+			timeline = append(timeline, timelineEvent{
+				Type:      evType,
+				Summary:   summary,
+				SummaryZH: summaryZH,
+				Detail:    detail,
+				Timestamp: a.Timestamp,
+			})
+		}
+
+		// 2. Recent builds (last 48h)
+		queued, running, complete, failed, _ := store.BuildStats()
+		if queued+running+complete+failed > 0 {
+			timeline = append(timeline, timelineEvent{
+				Type:      "build",
+				Summary:   fmt.Sprintf("Builds: %d queued, %d running, %d complete, %d failed", queued, running, complete, failed),
+				SummaryZH: fmt.Sprintf("构建: %d排队, %d运行, %d完成, %d失败", queued, running, complete, failed),
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+
+		// 3. Recent token events (last 48h, up to 20)
+		recentTokens, _ := store.RecentEvents("", 20)
+		for _, te := range recentTokens {
+			ts, err := time.Parse(time.RFC3339, te.Timestamp)
+			if err != nil || ts.Before(cutoff) {
+				continue
+			}
+			summary := fmt.Sprintf("◎%d %s: %s", te.Amount, te.EventType, te.Reason)
+			summaryZH := fmt.Sprintf("◎%d %s: %s", te.Amount, te.EventType, te.Reason)
+			timeline = append(timeline, timelineEvent{
+				Type:      "token",
+				Summary:   summary,
+				SummaryZH: summaryZH,
+				Timestamp: te.Timestamp,
+			})
+		}
+
+		// 4. Recent site errors (last 48h)
+		siteErrors, _ := store.RecentSiteEvents("error", 10)
+		for _, se := range siteErrors {
+			ts, err := time.Parse(time.RFC3339, se.Timestamp)
+			if err != nil || ts.Before(cutoff) {
+				continue
+			}
+			timeline = append(timeline, timelineEvent{
+				Type:      "error",
+				Summary:   fmt.Sprintf("Site error on %s", se.Page),
+				SummaryZH: fmt.Sprintf("站点错误: %s", se.Page),
+				Detail:    se.Detail,
+				Timestamp: se.Timestamp,
+			})
+		}
+
+		// Sort by timestamp descending (most recent first)
+		for i := 0; i < len(timeline); i++ {
+			for j := i + 1; j < len(timeline); j++ {
+				if timeline[j].Timestamp > timeline[i].Timestamp {
+					timeline[i], timeline[j] = timeline[j], timeline[i]
+				}
+			}
+		}
+
+		// Cap at 100 events
+		if len(timeline) > 100 {
+			timeline = timeline[:100]
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"events":    timeline,
+			"count":     len(timeline),
+			"window":    "48h",
+			"window_zh": "48小时",
 		})
 	})
 
