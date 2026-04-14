@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -19,7 +20,19 @@ import (
 	"glassfactory/internal/knowledge"
 	"glassfactory/internal/lending"
 	"glassfactory/internal/persist"
+	"glassfactory/internal/sentinel"
 )
+
+// biMsg returns an inline bilingual string: "en / zh".
+func biMsg(en, zh string) string {
+	return en + " / " + zh
+}
+
+// biErr returns a JSON error string with both languages.
+// Mandarin first — 普通话优先。
+func biErr(en, zh string) string {
+	return fmt.Sprintf(`{"error":"%s / %s","error_en":"%s","error_zh":"%s"}`, zh, en, en, zh)
+}
 
 // ── Inline registry (extracted from forge/components/universal.go) ───────────
 
@@ -277,6 +290,20 @@ func main() {
 		SourceRegistry: factoryID,
 	})
 
+	// ── Sentinel — health monitoring ──────────────────────────────────────────
+	selfURL := fmt.Sprintf("http://localhost:%s", port)
+	sentinelChecks := []sentinel.Check{
+		{Name: "self-health", URL: selfURL + "/api/registry/health", IntervalSecs: 30},
+		{Name: "build-queue", URL: selfURL + "/api/build/queue", IntervalSecs: 60},
+		{Name: "chain-integrity", URL: selfURL + "/api/tokens/chain/verify", IntervalSecs: 300},
+	}
+	sentry := sentinel.New(sentinelChecks, func(result sentinel.CheckResult) {
+		log.Printf("sentinel: ALERT %s failed — %s (status=%d, latency=%s)",
+			result.CheckName, result.Error, result.Status, result.Latency)
+	})
+	go sentry.Run(context.Background())
+	log.Printf("glassfactory: sentinel active — monitoring %d endpoints", len(sentinelChecks))
+
 	mux := http.NewServeMux()
 
 	// Registry endpoints
@@ -304,7 +331,7 @@ func main() {
 			Concerns     []string `json:"concerns"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		results := reg.Search(req.Capabilities, req.Patterns, req.Interfaces, req.Concerns)
@@ -318,12 +345,12 @@ func main() {
 	mux.HandleFunc("GET /api/registry/component/", func(w http.ResponseWriter, r *http.Request) {
 		uid := strings.TrimPrefix(r.URL.Path, "/api/registry/component/")
 		if uid == "" {
-			http.Error(w, `{"error":"uid required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("uid required", "需要组件标识"), http.StatusBadRequest)
 			return
 		}
 		desc, ok := reg.Get(uid)
 		if !ok {
-			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			http.Error(w, biErr("not found", "未找到"), http.StatusNotFound)
 			return
 		}
 		json.NewEncoder(w).Encode(desc)
@@ -333,18 +360,18 @@ func main() {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var desc ComponentDescriptor
 		if err := json.Unmarshal(body, &desc); err != nil {
-			http.Error(w, `{"error":"invalid component"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid component", "无效组件"), http.StatusBadRequest)
 			return
 		}
 		if desc.UID == "" {
-			http.Error(w, `{"error":"uid required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("uid required", "需要组件标识"), http.StatusBadRequest)
 			return
 		}
 		desc.SourceRegistry = factoryID
 		reg.Register(&desc)
 		log.Printf("registered component: %s", desc.UID)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"uid": desc.UID, "status": "registered"})
+		json.NewEncoder(w).Encode(map[string]string{"uid": desc.UID, "status": "registered", "status_zh": "已注册"})
 	})
 
 	mux.HandleFunc("GET /api/registry/peers", func(w http.ResponseWriter, r *http.Request) {
@@ -355,7 +382,7 @@ func main() {
 	mux.HandleFunc("POST /api/knowledge/contribute", func(w http.ResponseWriter, r *http.Request) {
 		var req knowledge.ContributeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		accepted, rejected := 0, 0
@@ -380,7 +407,7 @@ func main() {
 	mux.HandleFunc("POST /api/knowledge/query", func(w http.ResponseWriter, r *http.Request) {
 		var req knowledge.QueryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		results, _ := knowledgeStore.Query(req.Category, req.Language, req.Topics, req.Limit)
@@ -391,7 +418,7 @@ func main() {
 	mux.HandleFunc("POST /api/tokens/lend", func(w http.ResponseWriter, r *http.Request) {
 		var offer lending.Offer
 		if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if err := ledger.Lend(&offer); err != nil {
@@ -409,7 +436,7 @@ func main() {
 			Purpose  string `json:"purpose"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		loan, err := ledger.Borrow(req.LoanID, req.OfferID, req.Borrower, req.Purpose)
@@ -426,7 +453,7 @@ func main() {
 			ProofChain string `json:"proof_chain"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if err := ledger.Repay(req.LoanID, req.ProofChain); err != nil {
@@ -448,11 +475,11 @@ func main() {
 			Timestamp int64 `json:"timestamp"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if req.PublicKey == "" || len(req.PublicKey) != 64 {
-			http.Error(w, `{"error":"invalid public_key"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid public_key", "无效公钥"), http.StatusBadRequest)
 			return
 		}
 
@@ -505,14 +532,14 @@ func main() {
 			Timestamp  int64    `json:"timestamp"`
 		}
 		if err := json.Unmarshal(body, &hb); err != nil {
-			http.Error(w, `{"error":"invalid heartbeat"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid heartbeat", "无效心跳"), http.StatusBadRequest)
 			return
 		}
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		node, _ := store.GetNode(hb.PublicKey)
 		if node == nil {
-			http.Error(w, `{"error":"factory not registered — call /api/factory/register first"}`, http.StatusForbidden)
+			http.Error(w, biErr("factory not registered — call /api/factory/register first", "工厂未注册 - 请先调用 /api/factory/register"), http.StatusForbidden)
 			return
 		}
 
@@ -539,7 +566,7 @@ func main() {
 			Timestamp int64  `json:"timestamp"`
 		}
 		if err := json.Unmarshal(body, &report); err != nil {
-			http.Error(w, `{"error":"invalid report"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid report", "无效报告"), http.StatusBadRequest)
 			return
 		}
 
@@ -554,21 +581,21 @@ func main() {
 			Token string `json:"token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Token == "" {
-			http.Error(w, `{"error":"token required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("token required", "需要令牌"), http.StatusBadRequest)
 			return
 		}
 
 		// Parse token: hex(pubkey|timestamp).signature
 		parts := strings.SplitN(req.Token, ".", 2)
 		if len(parts) != 2 {
-			http.Error(w, `{"error":"invalid token format"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid token format", "令牌格式无效"), http.StatusBadRequest)
 			return
 		}
 
 		// Decode the payload to extract public key
 		payloadHex := parts[0]
 		if len(payloadHex) < 64 {
-			http.Error(w, `{"error":"token too short"}`, http.StatusBadRequest)
+			http.Error(w, biErr("token too short", "令牌太短"), http.StatusBadRequest)
 			return
 		}
 
@@ -601,7 +628,7 @@ func main() {
 		ev, err := store.AppendSignedEvent(pubKey, earlyAdopterGrant, "pair", "early adopter grant", hqPriv)
 		if err != nil {
 			log.Printf("signed event error: %v", err)
-			http.Error(w, `{"error":"obol grant failed"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("obol grant failed", "奥币发放失败"), http.StatusInternalServerError)
 			return
 		}
 
@@ -621,7 +648,9 @@ func main() {
 			"obs_granted":   earlyAdopterGrant,
 			"balance":       ev.Balance,
 			"receipt":       receipt,
-			"message":       "Welcome to the Glass Factory. ◎1,000 granted. 欢迎加入玻璃工厂。获得 ◎1,000 奥币。",
+			"message":       "欢迎加入玻璃工厂。获得 ◎1,000 奥币。Welcome to the Glass Factory. ◎1,000 granted.",
+			"message_en":    "Welcome to the Glass Factory. ◎1,000 granted.",
+			"message_zh":    "欢迎加入玻璃工厂。获得 ◎1,000 奥币。",
 		})
 	})
 
@@ -649,20 +678,20 @@ func main() {
 	mux.HandleFunc("POST /api/factory/vault-key", func(w http.ResponseWriter, r *http.Request) {
 		vaultKey := os.Getenv("VAULT_KEY")
 		if vaultKey == "" {
-			http.Error(w, `{"error":"vault not configured"}`, http.StatusServiceUnavailable)
+			http.Error(w, biErr("vault not configured", "密钥库未配置"), http.StatusServiceUnavailable)
 			return
 		}
 
 		pubKey := r.Header.Get("X-Factory-Key")
 		if pubKey == "" || len(pubKey) != 64 {
-			http.Error(w, `{"error":"factory identity required"}`, http.StatusUnauthorized)
+			http.Error(w, biErr("factory identity required", "需要工厂身份"), http.StatusUnauthorized)
 			return
 		}
 
 		// Only serve key to registered factories
 		node, _ := store.GetNode(pubKey)
 		if node == nil {
-			http.Error(w, `{"error":"factory not registered — register first"}`, http.StatusForbidden)
+			http.Error(w, biErr("factory not registered — register first", "工厂未注册 - 请先注册"), http.StatusForbidden)
 			return
 		}
 
@@ -683,7 +712,7 @@ func main() {
 	mux.HandleFunc("GET /api/tokens/balance/", func(w http.ResponseWriter, r *http.Request) {
 		pubKey := strings.TrimPrefix(r.URL.Path, "/api/tokens/balance/")
 		if pubKey == "" || len(pubKey) != 64 {
-			http.Error(w, `{"error":"public_key required (64 hex chars)"}`, http.StatusBadRequest)
+			http.Error(w, biErr("public_key required (64 hex chars)", "需要公钥（64位十六进制）"), http.StatusBadRequest)
 			return
 		}
 		bal, _ := store.GetBalance(pubKey)
@@ -708,18 +737,18 @@ func main() {
 			Reason   string `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if req.PublicKey == "" || req.Amount <= 0 {
-			http.Error(w, `{"error":"public_key and positive amount required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("public_key and positive amount required", "需要公钥和正数金额"), http.StatusBadRequest)
 			return
 		}
 
 		// Only registered factories can earn
 		earnNode, _ := store.GetNode(req.PublicKey)
 		if earnNode == nil {
-			http.Error(w, `{"error":"factory not registered"}`, http.StatusForbidden)
+			http.Error(w, biErr("factory not registered", "工厂未注册"), http.StatusForbidden)
 			return
 		}
 
@@ -752,18 +781,18 @@ func main() {
 			Purpose  string `json:"purpose"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if req.PublicKey == "" || req.Amount <= 0 {
-			http.Error(w, `{"error":"public_key and positive amount required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("public_key and positive amount required", "需要公钥和正数金额"), http.StatusBadRequest)
 			return
 		}
 
 		ev, err := store.AppendSignedEvent(req.PublicKey, -req.Amount, "spend", req.Purpose, hqPriv)
 		if err != nil {
 			bal, _ := store.GetBalance(req.PublicKey)
-			http.Error(w, fmt.Sprintf(`{"error":"insufficient obs: have ◎%d, need ◎%d"}`, bal, req.Amount), http.StatusPaymentRequired)
+			http.Error(w, fmt.Sprintf(`{"error":"insufficient obs: have ◎%d, need ◎%d","error_zh":"奥币不足: 余额 ◎%d, 需要 ◎%d"}`, bal, req.Amount, bal, req.Amount), http.StatusPaymentRequired)
 			return
 		}
 
@@ -813,7 +842,7 @@ func main() {
 	mux.HandleFunc("GET /api/tokens/chain", func(w http.ResponseWriter, r *http.Request) {
 		chain, err := store.FullChain(10000)
 		if err != nil {
-			http.Error(w, `{"error":"failed to read chain"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to read chain", "链读取失败"), http.StatusInternalServerError)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
@@ -830,7 +859,7 @@ func main() {
 			CounterSig string `json:"counter_sig"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if err := store.CounterSign(req.Seq, req.CounterSig); err != nil {
@@ -844,12 +873,12 @@ func main() {
 	mux.HandleFunc("GET /api/tokens/receipts/", func(w http.ResponseWriter, r *http.Request) {
 		pubKey := strings.TrimPrefix(r.URL.Path, "/api/tokens/receipts/")
 		if pubKey == "" || len(pubKey) != 64 {
-			http.Error(w, `{"error":"public_key required (64 hex chars)"}`, http.StatusBadRequest)
+			http.Error(w, biErr("public_key required (64 hex chars)", "需要公钥（64位十六进制）"), http.StatusBadRequest)
 			return
 		}
 		events, err := store.SignedEventsFor(pubKey, 1000)
 		if err != nil {
-			http.Error(w, `{"error":"failed to read receipts"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to read receipts", "收据读取失败"), http.StatusInternalServerError)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
@@ -869,15 +898,15 @@ func main() {
 			Destination string `json:"destination"` // network, local, company
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 		if len(req.Spec) < 10 {
-			http.Error(w, `{"error":"spec too short — at least 10 characters"}`, http.StatusBadRequest)
+			http.Error(w, biErr("spec too short — at least 10 characters", "规格说明太短 - 至少10个字符"), http.StatusBadRequest)
 			return
 		}
 		if len(req.Spec) > 50000 {
-			http.Error(w, `{"error":"spec too long — 50,000 characters max"}`, http.StatusBadRequest)
+			http.Error(w, biErr("spec too long — 50,000 characters max", "规格说明太长 - 最多50,000个字符"), http.StatusBadRequest)
 			return
 		}
 		if req.Destination == "" {
@@ -891,18 +920,18 @@ func main() {
 		if req.PublicKey != "" && req.Destination == "network" {
 			bal, err := store.GetBalance(req.PublicKey)
 			if err != nil {
-				http.Error(w, `{"error":"balance check failed"}`, http.StatusInternalServerError)
+				http.Error(w, biErr("balance check failed", "余额查询失败"), http.StatusInternalServerError)
 				return
 			}
 			if bal < cost {
-				http.Error(w, fmt.Sprintf(`{"error":"insufficient obs: have ◎%d, need ◎%d"}`, bal, cost), http.StatusPaymentRequired)
+				http.Error(w, fmt.Sprintf(`{"error":"insufficient obs: have ◎%d, need ◎%d","error_zh":"奥币不足: 余额 ◎%d, 需要 ◎%d"}`, bal, cost, bal, cost), http.StatusPaymentRequired)
 				return
 			}
 			// Deduct via signed chain
 			_, err = store.AppendSignedEvent(req.PublicKey, -cost, "spend", "build submission", hqPriv)
 			if err != nil {
 				log.Printf("build: deduct failed for %s: %v", req.PublicKey[:16], err)
-				http.Error(w, `{"error":"obol deduction failed"}`, http.StatusInternalServerError)
+				http.Error(w, biErr("obol deduction failed", "奥币扣除失败"), http.StatusInternalServerError)
 				return
 			}
 			log.Printf("build: ◎%d deducted from %s for build", cost, req.PublicKey[:16])
@@ -921,7 +950,7 @@ func main() {
 			UpdatedAt:   now,
 		}
 		if err := store.SubmitBuild(build); err != nil {
-			http.Error(w, `{"error":"failed to queue build"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to queue build", "构建入队失败"), http.StatusInternalServerError)
 			return
 		}
 
@@ -933,6 +962,7 @@ func main() {
 			"language":    lang,
 			"destination": req.Destination,
 			"message":     fmt.Sprintf("build %s queued — ◎%d charged", build.ID, cost),
+			"message_zh":  fmt.Sprintf("构建 %s 已入队 - 扣除 ◎%d 奥币", build.ID, cost),
 		})
 	})
 
@@ -940,16 +970,16 @@ func main() {
 	mux.HandleFunc("GET /api/build/status/", func(w http.ResponseWriter, r *http.Request) {
 		buildID := strings.TrimPrefix(r.URL.Path, "/api/build/status/")
 		if buildID == "" {
-			http.Error(w, `{"error":"build_id required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("build_id required", "需要构建编号"), http.StatusBadRequest)
 			return
 		}
 		build, err := store.GetBuild(buildID)
 		if err != nil {
-			http.Error(w, `{"error":"lookup failed"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("lookup failed", "查询失败"), http.StatusInternalServerError)
 			return
 		}
 		if build == nil {
-			http.Error(w, `{"error":"build not found"}`, http.StatusNotFound)
+			http.Error(w, biErr("build not found", "构建未找到"), http.StatusNotFound)
 			return
 		}
 		json.NewEncoder(w).Encode(build)
@@ -972,32 +1002,33 @@ func main() {
 			PublicKey string `json:"public_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PublicKey == "" {
-			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("public_key required", "需要公钥"), http.StatusBadRequest)
 			return
 		}
 
 		// Verify the factory is registered
 		node, err := store.GetNode(req.PublicKey)
 		if err != nil || node == nil {
-			http.Error(w, `{"error":"unknown factory — register first"}`, http.StatusForbidden)
+			http.Error(w, biErr("unknown factory — register first", "未知工厂 - 请先注册"), http.StatusForbidden)
 			return
 		}
 
 		build, err := store.NextQueuedBuild()
 		if err != nil {
-			http.Error(w, `{"error":"queue read failed"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("queue read failed", "队列读取失败"), http.StatusInternalServerError)
 			return
 		}
 		if build == nil {
 			json.NewEncoder(w).Encode(map[string]any{
 				"status":  "empty",
-				"message": "no builds in queue",
+				"message":    "no builds in queue",
+				"message_zh": "队列中无构建任务",
 			})
 			return
 		}
 
 		if err := store.AssignBuild(build.ID, req.PublicKey); err != nil {
-			http.Error(w, `{"error":"assignment failed"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("assignment failed", "分配失败"), http.StatusInternalServerError)
 			return
 		}
 
@@ -1020,13 +1051,13 @@ func main() {
 			Success   bool   `json:"success"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BuildID == "" {
-			http.Error(w, `{"error":"build_id required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("build_id required", "需要构建编号"), http.StatusBadRequest)
 			return
 		}
 
 		build, _ := store.GetBuild(req.BuildID)
 		if build == nil {
-			http.Error(w, `{"error":"build not found"}`, http.StatusNotFound)
+			http.Error(w, biErr("build not found", "构建未找到"), http.StatusNotFound)
 			return
 		}
 
@@ -1056,7 +1087,7 @@ func main() {
 	// Request an audience with the King
 	mux.HandleFunc("POST /api/king/audience", func(w http.ResponseWriter, r *http.Request) {
 		if aiKing == nil {
-			http.Error(w, `{"error":"the King is silent — no LLM configured"}`, http.StatusServiceUnavailable)
+			http.Error(w, biErr("the King is silent — no LLM configured", "大王沉默 - 未配置语言模型"), http.StatusServiceUnavailable)
 			return
 		}
 
@@ -1065,11 +1096,11 @@ func main() {
 			Message   string `json:"message"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
-			http.Error(w, `{"error":"message required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("message required", "需要消息内容"), http.StatusBadRequest)
 			return
 		}
 		if len(req.Message) > 4000 {
-			http.Error(w, `{"error":"the King's patience has limits — 4000 chars max"}`, http.StatusBadRequest)
+			http.Error(w, biErr("the King's patience has limits — 4000 chars max", "大王的耐心有限 - 最多4000字符"), http.StatusBadRequest)
 			return
 		}
 
@@ -1077,7 +1108,7 @@ func main() {
 		if req.PublicKey != "" {
 			lastTime, _ := store.LastAudienceTime(req.PublicKey)
 			if !lastTime.IsZero() && time.Since(lastTime) < time.Minute {
-				http.Error(w, `{"error":"the King grants one audience per minute. patience."}`, http.StatusTooManyRequests)
+				http.Error(w, biErr("the King grants one audience per minute. patience.", "大王每分钟只接见一次。请耐心等候。"), http.StatusTooManyRequests)
 				return
 			}
 		}
@@ -1113,7 +1144,7 @@ func main() {
 		response, tone, err := aiKing.Respond(ctx, profile, req.Message)
 		if err != nil {
 			log.Printf("king: audience error: %v", err)
-			http.Error(w, `{"error":"the King is indisposed"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("the King is indisposed", "大王身体不适"), http.StatusInternalServerError)
 			return
 		}
 
@@ -1149,7 +1180,7 @@ func main() {
 	mux.HandleFunc("GET /api/king/honours", func(w http.ResponseWriter, r *http.Request) {
 		honours, err := store.AllHonours()
 		if err != nil {
-			http.Error(w, `{"error":"failed to read honours"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to read honours", "荣誉读取失败"), http.StatusInternalServerError)
 			return
 		}
 		knights, _ := store.HonourCount("knight")
@@ -1166,12 +1197,12 @@ func main() {
 	mux.HandleFunc("GET /api/king/honours/", func(w http.ResponseWriter, r *http.Request) {
 		pubKey := strings.TrimPrefix(r.URL.Path, "/api/king/honours/")
 		if pubKey == "" {
-			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
+			http.Error(w, biErr("public_key required", "需要公钥"), http.StatusBadRequest)
 			return
 		}
 		honour, err := store.GetHonour(pubKey)
 		if err != nil {
-			http.Error(w, `{"error":"failed to read honour"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to read honour", "荣誉读取失败"), http.StatusInternalServerError)
 			return
 		}
 		if honour == nil {
@@ -1179,6 +1210,7 @@ func main() {
 				"rank":       "subject",
 				"public_key": pubKey,
 				"message":    "the King has not yet spoken your name",
+				"message_zh": "大王尚未赐名于你",
 			})
 			return
 		}
@@ -1196,18 +1228,18 @@ func main() {
 			AdminKey string `json:"admin_key"` // must match HQ public key
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 
 		// Verify admin authority (must know the HQ public key)
 		if req.AdminKey != hex.EncodeToString(hqPub) {
-			http.Error(w, `{"error":"only the King may grant honours"}`, http.StatusForbidden)
+			http.Error(w, biErr("only the King may grant honours", "只有大王可以授予荣誉"), http.StatusForbidden)
 			return
 		}
 
 		if req.Rank != "knight" && req.Rank != "minister" {
-			http.Error(w, `{"error":"rank must be 'knight' or 'minister'"}`, http.StatusBadRequest)
+			http.Error(w, biErr("rank must be 'knight' or 'minister'", "品级必须为骑士或大臣"), http.StatusBadRequest)
 			return
 		}
 
@@ -1220,7 +1252,7 @@ func main() {
 			Reason:   req.Reason,
 		}
 		if err := store.GrantHonour(honour); err != nil {
-			http.Error(w, `{"error":"failed to grant honour"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to grant honour", "授予荣誉失败"), http.StatusInternalServerError)
 			return
 		}
 
@@ -1230,7 +1262,8 @@ func main() {
 			"rank":      req.Rank,
 			"king_name": req.KingName,
 			"nickname":  req.Nickname,
-			"message":   fmt.Sprintf("the King has spoken. %s is now %s %s.", req.PublicKey[:16], req.Rank, req.KingName),
+			"message":    fmt.Sprintf("the King has spoken. %s is now %s %s.", req.PublicKey[:16], req.Rank, req.KingName),
+			"message_zh": fmt.Sprintf("大王已言。%s 今为%s %s。", req.PublicKey[:16], req.Rank, req.KingName),
 		})
 	})
 
@@ -1241,30 +1274,31 @@ func main() {
 			Nickname string `json:"nickname"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			http.Error(w, biErr("invalid request", "无效请求"), http.StatusBadRequest)
 			return
 		}
 
 		honour, _ := store.GetHonour(req.PublicKey)
 		if honour == nil {
-			http.Error(w, `{"error":"the King has not honoured you — nicknames are for Knights and Ministers"}`, http.StatusForbidden)
+			http.Error(w, biErr("the King has not honoured you — nicknames are for Knights and Ministers", "大王尚未赐封 - 昵称仅限骑士和大臣"), http.StatusForbidden)
 			return
 		}
 
 		// Validate nickname: must be composed of words, max 32 chars
 		nickname := strings.TrimSpace(req.Nickname)
 		if nickname == "" || len(nickname) > 32 {
-			http.Error(w, `{"error":"nickname must be 1-32 characters, a word or words in any language"}`, http.StatusBadRequest)
+			http.Error(w, biErr("nickname must be 1-32 characters, a word or words in any language", "昵称须1-32字符，任何语言皆可"), http.StatusBadRequest)
 			return
 		}
 
 		if err := store.SetNickname(req.PublicKey, nickname); err != nil {
-			http.Error(w, `{"error":"failed to set nickname"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to set nickname", "设置昵称失败"), http.StatusInternalServerError)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]string{
-			"status":   "nickname set",
-			"nickname": nickname,
+			"status":    "nickname set",
+			"status_zh": "昵称已设置",
+			"nickname":  nickname,
 		})
 	})
 
@@ -1273,12 +1307,124 @@ func main() {
 		pubKey := r.URL.Query().Get("pubkey")
 		audiences, err := store.RecentAudiences(pubKey, 50)
 		if err != nil {
-			http.Error(w, `{"error":"failed to read audiences"}`, http.StatusInternalServerError)
+			http.Error(w, biErr("failed to read audiences", "觐见记录读取失败"), http.StatusInternalServerError)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"audiences": audiences,
 			"count":     len(audiences),
+		})
+	})
+
+	// ── Sentinel Status Endpoint ─────────────────────────────────────────────
+
+	mux.HandleFunc("GET /api/sentinel/status", func(w http.ResponseWriter, r *http.Request) {
+		results := sentry.LastResults()
+		allOK := true
+		for _, res := range results {
+			if !res.OK {
+				allOK = false
+				break
+			}
+		}
+		status := "healthy"
+		statusZH := "健康"
+		if !allOK {
+			status = "degraded"
+			statusZH = "异常"
+		}
+		// Convert to JSON-friendly format
+		type checkJSON struct {
+			Name      string `json:"name"`
+			URL       string `json:"url"`
+			OK        bool   `json:"ok"`
+			Status    int    `json:"status"`
+			LatencyMs int64  `json:"latency_ms"`
+			Error     string `json:"error,omitempty"`
+			Timestamp string `json:"timestamp"`
+		}
+		var checks []checkJSON
+		for _, res := range results {
+			checks = append(checks, checkJSON{
+				Name:      res.CheckName,
+				URL:       res.URL,
+				OK:        res.OK,
+				Status:    res.Status,
+				LatencyMs: res.Latency.Milliseconds(),
+				Error:     res.Error,
+				Timestamp: res.Timestamp.UTC().Format(time.RFC3339),
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":    status,
+			"status_zh": statusZH,
+			"checks":    checks,
+			"count":     len(checks),
+		})
+	})
+
+	// ── Site Analytics Endpoints ─────────────────────────────────────────────
+
+	// Record a site event (page view, error, click)
+	mux.HandleFunc("POST /api/site/event", func(w http.ResponseWriter, r *http.Request) {
+		var ev persist.SiteEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			http.Error(w, biErr("invalid event", "无效事件"), http.StatusBadRequest)
+			return
+		}
+		if ev.Page == "" {
+			ev.Page = "/"
+		}
+		if ev.EventType == "" {
+			ev.EventType = "pageview"
+		}
+		ev.Timestamp = time.Now().UTC().Format(time.RFC3339)
+
+		// Truncate oversized fields to prevent abuse
+		if len(ev.Detail) > 1000 {
+			ev.Detail = ev.Detail[:1000]
+		}
+		if len(ev.UserAgent) > 500 {
+			ev.UserAgent = ev.UserAgent[:500]
+		}
+		if len(ev.Referrer) > 500 {
+			ev.Referrer = ev.Referrer[:500]
+		}
+
+		if err := store.RecordEvent(&ev); err != nil {
+			log.Printf("analytics: record error: %v", err)
+			http.Error(w, biErr("event recording failed", "事件记录失败"), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Site analytics dashboard data
+	mux.HandleFunc("GET /api/site/stats", func(w http.ResponseWriter, r *http.Request) {
+		total, today, uniquePages, err := store.EventStats()
+		if err != nil {
+			http.Error(w, biErr("stats read failed", "统计读取失败"), http.StatusInternalServerError)
+			return
+		}
+
+		// Page view breakdown
+		since := time.Now().UTC().AddDate(0, 0, -30).Format(time.RFC3339)
+		pages, _ := store.PageViews(since, 50)
+
+		// Hourly traffic for last 24h
+		hourSince := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+		hourly, _ := store.EventsByHour(hourSince)
+
+		// Recent errors
+		errors, _ := store.RecentSiteEvents("error", 20)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"total":        total,
+			"today":        today,
+			"unique_pages": uniquePages,
+			"pages":        pages,
+			"hourly":       hourly,
+			"recent_errors": errors,
 		})
 	})
 
