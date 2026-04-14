@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -193,6 +195,33 @@ func main() {
 	}
 	defer store.Close()
 	store.LogRecovery()
+
+	// Load or generate HQ Ed25519 signing key for the token chain.
+	// Set HQ_SIGNING_KEY env var (hex-encoded 128-char private key) for production.
+	// If not set, generates an ephemeral key (fine for dev, not for production).
+	var hqPriv ed25519.PrivateKey
+	var hqPub ed25519.PublicKey
+	if keyHex := os.Getenv("HQ_SIGNING_KEY"); keyHex != "" {
+		keyBytes, err := hex.DecodeString(keyHex)
+		if err != nil || len(keyBytes) != ed25519.PrivateKeySize {
+			log.Fatalf("HQ_SIGNING_KEY: invalid Ed25519 private key (need %d hex chars)", ed25519.PrivateKeySize*2)
+		}
+		hqPriv = ed25519.PrivateKey(keyBytes)
+		hqPub = hqPriv.Public().(ed25519.PublicKey)
+		log.Printf("glassfactory: HQ signing key loaded (pub=%.16s…)", hex.EncodeToString(hqPub))
+	} else {
+		hqPub, hqPriv, _ = ed25519.GenerateKey(nil)
+		log.Printf("glassfactory: WARNING — ephemeral HQ signing key generated. Set HQ_SIGNING_KEY for production.")
+		log.Printf("glassfactory: HQ pub key: %s", hex.EncodeToString(hqPub))
+	}
+
+	// Verify chain integrity on startup
+	if lastSeq, err := store.ChainIntegrity(hqPub); err != nil {
+		log.Printf("glassfactory: CHAIN INTEGRITY FAILURE at seq %d: %v", lastSeq, err)
+		log.Printf("glassfactory: Token chain has been tampered with. Investigate immediately.")
+	} else if lastSeq > 0 {
+		log.Printf("glassfactory: chain verified — %d events, integrity OK ✓", lastSeq)
+	}
 
 	reg := NewRegistry(factoryID)
 	knowledgeStore := knowledge.NewMemStore()
@@ -548,25 +577,31 @@ func main() {
 			log.Printf("persist pair error: %v", err)
 		}
 
-		// Grant early adopter tokens — persisted to SQLite
+		// Grant early adopter tokens — signed hash chain entry
 		earlyAdopterGrant := int64(1000)
-		newBal, err := store.AdjustBalance(pubKey, earlyAdopterGrant, "pair", "early adopter grant")
+		ev, err := store.AppendSignedEvent(pubKey, earlyAdopterGrant, "pair", "early adopter grant", hqPriv)
 		if err != nil {
-			log.Printf("persist token grant error: %v", err)
+			log.Printf("signed event error: %v", err)
+			http.Error(w, `{"error":"token grant failed"}`, http.StatusInternalServerError)
+			return
 		}
 
 		// Sync into lending ledger
 		ledger.RegisterMaker(pubKey)
-		ledger.SetBalance(pubKey, newBal)
+		ledger.SetBalance(pubKey, ev.Balance)
 
-		log.Printf("factory paired: %.8s (granted %d tokens, balance %d)", pubKey, earlyAdopterGrant, newBal)
+		// Return receipt so factory node can verify independently
+		receipt := ev.ToReceipt(hqPub)
+
+		log.Printf("factory paired: %.8s (granted %d tokens, balance %d, chain seq %d)", pubKey, earlyAdopterGrant, ev.Balance, ev.Seq)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":        "paired",
 			"public_key":    pubKey,
 			"fingerprint":   pubKey[:16],
 			"tokens_granted": earlyAdopterGrant,
-			"balance":       newBal,
+			"balance":       ev.Balance,
+			"receipt":       receipt,
 			"message":       "Welcome to the Glass Factory. 1000 tokens granted. 欢迎加入玻璃工厂。",
 		})
 	})
@@ -670,7 +705,7 @@ func main() {
 		}
 
 		reason := fmt.Sprintf("job=%s %s", req.JobID, req.Reason)
-		newBal, err := store.AdjustBalance(req.PublicKey, req.Amount, "earn", reason)
+		ev, err := store.AppendSignedEvent(req.PublicKey, req.Amount, "earn", reason, hqPriv)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
@@ -678,13 +713,15 @@ func main() {
 
 		// Sync into lending ledger
 		ledger.RegisterMaker(req.PublicKey)
-		ledger.SetBalance(req.PublicKey, newBal)
+		ledger.SetBalance(req.PublicKey, ev.Balance)
 
-		log.Printf("tokens earned: %.8s +%d bal=%d (job=%s reason=%s)", req.PublicKey, req.Amount, newBal, req.JobID, req.Reason)
+		receipt := ev.ToReceipt(hqPub)
+		log.Printf("tokens earned: %.8s +%d bal=%d seq=%d (job=%s)", req.PublicKey, req.Amount, ev.Balance, ev.Seq, req.JobID)
 		json.NewEncoder(w).Encode(map[string]any{
 			"public_key": req.PublicKey,
 			"earned":     req.Amount,
-			"balance":    newBal,
+			"balance":    ev.Balance,
+			"receipt":    receipt,
 		})
 	})
 
@@ -704,7 +741,7 @@ func main() {
 			return
 		}
 
-		newBal, err := store.AdjustBalance(req.PublicKey, -req.Amount, "spend", req.Purpose)
+		ev, err := store.AppendSignedEvent(req.PublicKey, -req.Amount, "spend", req.Purpose, hqPriv)
 		if err != nil {
 			bal, _ := store.GetBalance(req.PublicKey)
 			http.Error(w, fmt.Sprintf(`{"error":"insufficient tokens: have %d, need %d"}`, bal, req.Amount), http.StatusPaymentRequired)
@@ -712,13 +749,15 @@ func main() {
 		}
 
 		// Sync into lending ledger
-		ledger.SetBalance(req.PublicKey, newBal)
+		ledger.SetBalance(req.PublicKey, ev.Balance)
 
-		log.Printf("tokens spent: %.8s -%d bal=%d (purpose=%s)", req.PublicKey, req.Amount, newBal, req.Purpose)
+		receipt := ev.ToReceipt(hqPub)
+		log.Printf("tokens spent: %.8s -%d bal=%d seq=%d (purpose=%s)", req.PublicKey, req.Amount, ev.Balance, ev.Seq, req.Purpose)
 		json.NewEncoder(w).Encode(map[string]any{
 			"public_key": req.PublicKey,
 			"spent":      req.Amount,
-			"balance":    newBal,
+			"balance":    ev.Balance,
+			"receipt":    receipt,
 		})
 	})
 
@@ -728,6 +767,76 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"total_tokens":     totalTokens,
 			"outstanding_debt": ledger.TotalOutstandingDebt(),
+		})
+	})
+
+	// ── Chain verification endpoints (zero-trust audit) ─────────────────
+
+	// Public: anyone can verify the entire chain
+	mux.HandleFunc("GET /api/tokens/chain/verify", func(w http.ResponseWriter, r *http.Request) {
+		lastSeq, err := store.ChainIntegrity(hqPub)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]any{
+				"valid":      false,
+				"failed_seq": lastSeq,
+				"error":      err.Error(),
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"valid":        true,
+			"last_seq":     lastSeq,
+			"hq_pub_key":  hex.EncodeToString(hqPub),
+		})
+	})
+
+	// Public: download the full chain for independent verification
+	mux.HandleFunc("GET /api/tokens/chain", func(w http.ResponseWriter, r *http.Request) {
+		chain, err := store.FullChain(10000)
+		if err != nil {
+			http.Error(w, `{"error":"failed to read chain"}`, http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"chain":      chain,
+			"length":     len(chain),
+			"hq_pub_key": hex.EncodeToString(hqPub),
+		})
+	})
+
+	// Factory nodes counter-sign their receipts
+	mux.HandleFunc("POST /api/tokens/chain/countersign", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Seq        int64  `json:"seq"`
+			CounterSig string `json:"counter_sig"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if err := store.CounterSign(req.Seq, req.CounterSig); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "countersigned"})
+	})
+
+	// Factory nodes can fetch their signed receipts
+	mux.HandleFunc("GET /api/tokens/receipts/", func(w http.ResponseWriter, r *http.Request) {
+		pubKey := strings.TrimPrefix(r.URL.Path, "/api/tokens/receipts/")
+		if pubKey == "" || len(pubKey) != 64 {
+			http.Error(w, `{"error":"public_key required (64 hex chars)"}`, http.StatusBadRequest)
+			return
+		}
+		events, err := store.SignedEventsFor(pubKey, 1000)
+		if err != nil {
+			http.Error(w, `{"error":"failed to read receipts"}`, http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"receipts":   events,
+			"count":      len(events),
+			"hq_pub_key": hex.EncodeToString(hqPub),
 		})
 	})
 
