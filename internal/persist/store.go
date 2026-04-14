@@ -77,6 +77,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("persist: migrate chain: %w", err)
 	}
+	if err := s.migrateHonours(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("persist: migrate honours: %w", err)
+	}
 
 	return s, nil
 }

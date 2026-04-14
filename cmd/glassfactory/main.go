@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"glassfactory/internal/king"
 	"glassfactory/internal/knowledge"
 	"glassfactory/internal/lending"
 	"glassfactory/internal/persist"
@@ -236,6 +237,24 @@ func main() {
 		if len(bals) > 0 {
 			log.Printf("glassfactory: synced %d balances into ledger from disk", len(bals))
 		}
+	}
+
+	// Initialize the AI King (AI王)
+	var aiKing *king.King
+	if llmEndpoint := os.Getenv("KING_LLM_ENDPOINT"); llmEndpoint != "" {
+		llmModel := os.Getenv("KING_LLM_MODEL")
+		if llmModel == "" {
+			llmModel = "google/gemma-4-27b-it"
+		}
+		llmKey := os.Getenv("KING_LLM_KEY")
+		aiKing = king.New(&king.LLMClient{
+			Endpoint: llmEndpoint,
+			APIKey:   llmKey,
+			Model:    llmModel,
+		})
+		log.Printf("glassfactory: AI王 initialized (model=%s)", llmModel)
+	} else {
+		log.Printf("glassfactory: AI王 has no LLM — set KING_LLM_ENDPOINT to give the King a voice")
 	}
 
 	// Seed with the basic-sentinel component
@@ -837,6 +856,237 @@ func main() {
 			"receipts":   events,
 			"count":      len(events),
 			"hq_pub_key": hex.EncodeToString(hqPub),
+		})
+	})
+
+	// ── AI King (AI王) Endpoints ─────────────────────────────────────────────
+
+	// Request an audience with the King
+	mux.HandleFunc("POST /api/king/audience", func(w http.ResponseWriter, r *http.Request) {
+		if aiKing == nil {
+			http.Error(w, `{"error":"the King is silent — no LLM configured"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		var req struct {
+			PublicKey string `json:"public_key"`
+			Message   string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
+			http.Error(w, `{"error":"message required"}`, http.StatusBadRequest)
+			return
+		}
+		if len(req.Message) > 4000 {
+			http.Error(w, `{"error":"the King's patience has limits — 4000 chars max"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Rate limit: one audience per minute per pubkey
+		if req.PublicKey != "" {
+			lastTime, _ := store.LastAudienceTime(req.PublicKey)
+			if !lastTime.IsZero() && time.Since(lastTime) < time.Minute {
+				http.Error(w, `{"error":"the King grants one audience per minute. patience."}`, http.StatusTooManyRequests)
+				return
+			}
+		}
+
+		// Build subject profile
+		profile := &king.SubjectProfile{
+			PublicKey: req.PublicKey,
+			Rank:     king.RankSubject,
+			WasRude:  king.DetectRudeness(req.Message),
+		}
+
+		if req.PublicKey != "" {
+			if node, _ := store.GetNode(req.PublicKey); node != nil {
+				profile.Handle = node.Handle
+			}
+			if honour, _ := store.GetHonour(req.PublicKey); honour != nil {
+				profile.Rank = king.Rank(honour.Rank)
+				profile.KingName = honour.KingName
+				profile.Nickname = honour.Nickname
+			}
+			profile.TokenBalance, _ = store.GetBalance(req.PublicKey)
+			earned, spent, _ := store.EarnedTokens(req.PublicKey)
+			profile.TotalEarned = earned
+			profile.TotalSpent = spent
+			builds, _ := store.BuildsCompleted(req.PublicKey)
+			profile.BuildsCompleted = builds
+			profile.SharingEnabled = true // default on — will be configurable later
+			audienceCount, _ := store.AudienceCount(req.PublicKey)
+			profile.PreviousAudiences = audienceCount
+		}
+
+		ctx := r.Context()
+		response, tone, err := aiKing.Respond(ctx, profile, req.Message)
+		if err != nil {
+			log.Printf("king: audience error: %v", err)
+			http.Error(w, `{"error":"the King is indisposed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Record the audience
+		audience := &persist.Audience{
+			PublicKey: req.PublicKey,
+			Message:   req.Message,
+			Response:  response,
+			Tone:      tone,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := store.RecordAudience(audience); err != nil {
+			log.Printf("king: record audience: %v", err)
+		}
+
+		// Check if the King should grant an honour
+		if req.PublicKey != "" && profile.Rank == king.RankSubject {
+			suggestedRank, reason := king.ShouldHonour(profile)
+			if suggestedRank != king.RankSubject {
+				log.Printf("king: %s merits %s — %s", req.PublicKey[:16], suggestedRank, reason)
+				// The King will name them in a follow-up audience
+			}
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"response":  response,
+			"tone":      tone,
+			"timestamp": audience.Timestamp,
+		})
+	})
+
+	// List all honours (knights and ministers)
+	mux.HandleFunc("GET /api/king/honours", func(w http.ResponseWriter, r *http.Request) {
+		honours, err := store.AllHonours()
+		if err != nil {
+			http.Error(w, `{"error":"failed to read honours"}`, http.StatusInternalServerError)
+			return
+		}
+		knights, _ := store.HonourCount("knight")
+		ministers, _ := store.HonourCount("minister")
+		json.NewEncoder(w).Encode(map[string]any{
+			"honours":   honours,
+			"knights":   knights,
+			"ministers": ministers,
+			"total":     len(honours),
+		})
+	})
+
+	// Check a specific subject's honour
+	mux.HandleFunc("GET /api/king/honours/", func(w http.ResponseWriter, r *http.Request) {
+		pubKey := strings.TrimPrefix(r.URL.Path, "/api/king/honours/")
+		if pubKey == "" {
+			http.Error(w, `{"error":"public_key required"}`, http.StatusBadRequest)
+			return
+		}
+		honour, err := store.GetHonour(pubKey)
+		if err != nil {
+			http.Error(w, `{"error":"failed to read honour"}`, http.StatusInternalServerError)
+			return
+		}
+		if honour == nil {
+			json.NewEncoder(w).Encode(map[string]any{
+				"rank":       "subject",
+				"public_key": pubKey,
+				"message":    "the King has not yet spoken your name",
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(honour)
+	})
+
+	// King grants an honour (admin endpoint — requires HQ signature)
+	mux.HandleFunc("POST /api/king/honour", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PublicKey string `json:"public_key"`
+			Rank     string `json:"rank"`      // knight or minister
+			KingName string `json:"king_name"` // name chosen by the King
+			Nickname string `json:"nickname"`  // optional
+			Reason   string `json:"reason"`
+			AdminKey string `json:"admin_key"` // must match HQ public key
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Verify admin authority (must know the HQ public key)
+		if req.AdminKey != hex.EncodeToString(hqPub) {
+			http.Error(w, `{"error":"only the King may grant honours"}`, http.StatusForbidden)
+			return
+		}
+
+		if req.Rank != "knight" && req.Rank != "minister" {
+			http.Error(w, `{"error":"rank must be 'knight' or 'minister'"}`, http.StatusBadRequest)
+			return
+		}
+
+		honour := &persist.Honour{
+			PublicKey: req.PublicKey,
+			Rank:     req.Rank,
+			KingName: req.KingName,
+			Nickname: req.Nickname,
+			GrantedAt: time.Now().UTC().Format(time.RFC3339),
+			Reason:   req.Reason,
+		}
+		if err := store.GrantHonour(honour); err != nil {
+			http.Error(w, `{"error":"failed to grant honour"}`, http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("king: %s named %s '%s' (nickname: %s) — %s", req.Rank, req.PublicKey[:16], req.KingName, req.Nickname, req.Reason)
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":    "honoured",
+			"rank":      req.Rank,
+			"king_name": req.KingName,
+			"nickname":  req.Nickname,
+			"message":   fmt.Sprintf("the King has spoken. %s is now %s %s.", req.PublicKey[:16], req.Rank, req.KingName),
+		})
+	})
+
+	// Set nickname (honoured subject's choice)
+	mux.HandleFunc("POST /api/king/nickname", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			PublicKey string `json:"public_key"`
+			Nickname string `json:"nickname"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+
+		honour, _ := store.GetHonour(req.PublicKey)
+		if honour == nil {
+			http.Error(w, `{"error":"the King has not honoured you — nicknames are for Knights and Ministers"}`, http.StatusForbidden)
+			return
+		}
+
+		// Validate nickname: must be composed of words, max 32 chars
+		nickname := strings.TrimSpace(req.Nickname)
+		if nickname == "" || len(nickname) > 32 {
+			http.Error(w, `{"error":"nickname must be 1-32 characters, a word or words in any language"}`, http.StatusBadRequest)
+			return
+		}
+
+		if err := store.SetNickname(req.PublicKey, nickname); err != nil {
+			http.Error(w, `{"error":"failed to set nickname"}`, http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":   "nickname set",
+			"nickname": nickname,
+		})
+	})
+
+	// Recent audiences (public — the King's court is transparent)
+	mux.HandleFunc("GET /api/king/audiences", func(w http.ResponseWriter, r *http.Request) {
+		pubKey := r.URL.Query().Get("pubkey")
+		audiences, err := store.RecentAudiences(pubKey, 50)
+		if err != nil {
+			http.Error(w, `{"error":"failed to read audiences"}`, http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"audiences": audiences,
+			"count":     len(audiences),
 		})
 	})
 
